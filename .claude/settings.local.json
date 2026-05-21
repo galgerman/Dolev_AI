@@ -1,0 +1,7 @@
+{
+  "permissions": {
+    "allow": [
+      "PowerShell(if \\(-not \\(Test-Path \"C:\\\\CodeProjects\\\\dolev_ai\\\\.claude\\\\plans\"\\)\\) { New-Item -ItemType Directory -Force -Path \"C:\\\\CodeProjects\\\\dolev_ai\\\\.claude\\\\plans\" | Out-Null }; Copy-Item -Path \"$env:USERPROFILE\\\\.claude\\\\plans\\\\i-want-to-design-parsed-sunbeam.md\" -Destination \"C:\\\\CodeProjects\\\\dolev_ai\\\\.claude\\\\plans\\\\i-want-to-design-parsed-sunbeam.md\" -Force; Test-Path \"C:\\\\CodeProjects\\\\dolev_ai\\\\.claude\\\\plans\\\\i-want-to-design-parsed-sunbeam.md\")"
+    ]
+  }
+}

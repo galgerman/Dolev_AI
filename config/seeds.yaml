@@ -1,0 +1,126 @@
+# Finance Twitter seed accounts for the trust-graph signal strategy.
+# tier: 1 = weight ×1.0, 2 = weight ×0.7, 3 = weight ×0.4
+# Override credibility_override (0..1) to pin a specific weight.
+# Expand to 80-100 accounts once initial signal quality is validated.
+
+accounts:
+  # ── Tier 1: News wires & institutional journalists ──────────────────────
+  - handle: DeItaone
+    tier: 1
+    note: "Real-time market headlines, institutional flow"
+
+  - handle: FirstSquawk
+    tier: 1
+    note: "Breaking macro + equity news"
+
+  - handle: financialjuice
+    tier: 1
+    note: "Rapid-fire news aggregator"
+
+  - handle: WSJmarkets
+    tier: 1
+    note: "WSJ market desk"
+
+  - handle: markets
+    tier: 1
+    note: "Bloomberg Markets"
+
+  - handle: CNBCnow
+    tier: 1
+    note: "CNBC breaking news"
+
+  - handle: Reuters
+    tier: 1
+    note: "Reuters global news"
+
+  - handle: business
+    tier: 1
+    note: "Bloomberg Business"
+
+  - handle: StockMKTNewz
+    tier: 1
+    note: "Market headlines aggregator"
+
+  # ── Tier 1: Macro & strategy ─────────────────────────────────────────────
+  - handle: LizAnnSonders
+    tier: 1
+    note: "Schwab Chief Investment Strategist"
+
+  - handle: charliebilello
+    tier: 1
+    note: "Compound Capital, macro charts + analysis"
+
+  - handle: SoberLook
+    tier: 1
+    note: "Macro research, credit markets"
+
+  - handle: lisaabramowicz1
+    tier: 1
+    note: "Bloomberg macro journalist"
+
+  - handle: LawrenceMcDonald
+    tier: 1
+    note: "Bear Traps Report, macro risk"
+
+  - handle: michaelbatnick
+    tier: 1
+    note: "Ritholtz Wealth, thoughtful equity commentary"
+
+  - handle: ritholtz
+    tier: 1
+    note: "Josh Brown / Ritholtz Wealth"
+
+  - handle: morganhousel
+    tier: 1
+    note: "Collaborative Fund, behavioral finance"
+
+  - handle: HowardLindzon
+    tier: 1
+    note: "StockTwits founder, early-stage + equities"
+
+  # ── Tier 2: Options flow & quant signals ─────────────────────────────────
+  - handle: unusual_whales
+    tier: 2
+    note: "Options flow, dark pool, congressional trades"
+
+  - handle: cheddar_flow
+    tier: 2
+    note: "Real-time options flow alerts"
+
+  - handle: SqueezeMetrics
+    tier: 2
+    note: "GEX, dark pool index, gamma exposure"
+
+  # ── Tier 2: Buy-side, independent analysts ───────────────────────────────
+  - handle: Mayhem4Markets
+    tier: 2
+    note: "Technicals + sentiment, active trader"
+
+  - handle: TihoBrkan
+    tier: 2
+    note: "Global macro, asset allocation charts"
+
+  - handle: MacroAlf
+    tier: 2
+    note: "Alfonso Peccatiello, macro / fixed income"
+
+  - handle: hedgeye
+    tier: 2
+    note: "Hedgeye Risk Management research"
+
+  - handle: RaoulGMI
+    tier: 2
+    note: "Real Vision, macro + crypto risk-on signals"
+
+  # ── Tier 3: High-volume / retail momentum ────────────────────────────────
+  - handle: zerohedge
+    tier: 3
+    note: "High volume, macro/bearish bias — useful for fear signals"
+
+  - handle: SentimenTrader
+    tier: 3
+    note: "Sentiment extremes, contrarian signals"
+
+  - handle: bespokeinvest
+    tier: 3
+    note: "Bespoke Investment Group, breadth + technicals"

@@ -1,0 +1,27 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+*.egg
+
+# Env
+.env
+
+# Data
+data/
+config/universe.csv
+
+# Playwright browser profile (contains login session — never commit)
+browser_profile/
+
+# IDE
+.vscode/
+.idea/
+
+# Misc
+*.log
+.DS_Store

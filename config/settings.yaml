@@ -1,0 +1,36 @@
+poll_cadence_minutes: 5        # how often PlaywrightSource collects tweets
+eval_cadence_minutes: 2        # how often aggregator + strategy runs
+
+score_window_minutes: 60       # rolling window for per-ticker score
+credibility:
+  tier_weights:
+    1: 1.0
+    2: 0.7
+    3: 0.4
+
+trust_graph:
+  min_credible_voices: 3       # minimum distinct credible authors in window
+  score_threshold: 5.0         # |score| must exceed this to emit signal
+  cooldown_hours: 4            # don't re-alert same ticker within this window
+  cooldown_override_multiplier: 2.0  # bypass cooldown if score doubles
+
+sentiment:
+  model: ProsusAI/finbert
+  device: cpu                  # change to "cuda" if GPU available
+  batch_size: 16
+
+synth:
+  model: claude-sonnet-4-6
+  cache_system_prompt: true
+  max_driving_tweets: 10       # top N tweets passed to synthesizer
+
+universe:
+  refresh_days: 7              # re-download symbol list every N days
+
+playwright:
+  headless: false              # keep true=headless; false helps debug & avoids bot detection
+  profile_dir: browser_profile
+  request_delay_min_s: 3.0
+  request_delay_max_s: 6.0
+  max_accounts_per_poll: 50
+  scroll_count: 3              # number of scrolls per timeline page
