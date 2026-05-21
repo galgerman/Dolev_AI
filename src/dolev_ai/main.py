@@ -91,9 +91,75 @@ class Agent:
                 cooldown_hours=tg_cfg.get("cooldown_hours", 4.0),
                 cooldown_override_multiplier=tg_cfg.get("cooldown_override_multiplier", 2.0),
                 last_alert_time_fn=lambda t: last_alert_time(session, t),
-            )
+        )
         # Track last threshold_progress per ticker to detect near-threshold crossings
         self._last_threshold_progress: dict[str, float] = {}
+        self._scheduler: AsyncIOScheduler | None = None
+        self._worker_started_at: datetime | None = None
+        self._worker_lock = asyncio.Lock()
+
+    @property
+    def event_bus(self) -> EventBus:
+        return self._event_bus
+
+    @property
+    def session_factory(self):
+        return self._session_factory
+
+    @property
+    def threshold(self) -> float:
+        return self._threshold
+
+    def status(self) -> dict:
+        return {
+            "running": self._scheduler is not None,
+            "started_at": self._worker_started_at.isoformat() if self._worker_started_at else None,
+            "mode": "dry-run" if self._dry_run else "live",
+        }
+
+    async def start_worker(self) -> bool:
+        async with self._worker_lock:
+            if self._scheduler is not None:
+                return False
+
+            await self._source.start()
+            scheduler = AsyncIOScheduler()
+            scheduler.add_job(
+                self.collect, "interval",
+                minutes=self._cfg.get("poll_cadence_minutes", 5),
+                next_run_time=datetime.utcnow(),
+            )
+            scheduler.add_job(
+                self.evaluate, "interval",
+                minutes=self._cfg.get("eval_cadence_minutes", 2),
+                next_run_time=datetime.utcnow() + timedelta(seconds=30),
+            )
+            scheduler.start()
+            self._scheduler = scheduler
+            self._worker_started_at = datetime.utcnow()
+            logger.info("Dolev AI scraper agent started.")
+            return True
+
+    async def stop_worker(self) -> bool:
+        async with self._worker_lock:
+            if self._scheduler is None:
+                return False
+
+            scheduler = self._scheduler
+            self._scheduler = None
+            self._worker_started_at = None
+            scheduler.shutdown(wait=False)
+            await self._source.stop()
+            await self._event_bus.publish({
+                "type": "collection.finished",
+                "total": 0,
+                "completed": 0,
+                "current_handle": None,
+                "tweets_found": 0,
+                "tickers_found": 0,
+            })
+            logger.info("Dolev AI scraper agent stopped.")
+            return True
 
     async def collect(self) -> None:
         """Fetch recent tweets and persist. Publishes tweet.ingested events."""
@@ -277,7 +343,6 @@ class Agent:
 
     async def run(self) -> None:
         started_at = datetime.utcnow()
-        await self._source.start()
 
         # Start FastAPI + uvicorn in the same event loop
         app = create_app(
@@ -285,6 +350,7 @@ class Agent:
             session_factory=self._session_factory,
             threshold=self._threshold,
             started_at=started_at,
+            agent_control=self,
         )
         web_config = uvicorn.Config(
             app, host="127.0.0.1", port=8000, log_level="warning", loop="none"
@@ -293,18 +359,7 @@ class Agent:
         asyncio.create_task(web_server.serve())
         logger.info("Monitoring dashboard: http://localhost:8000")
 
-        scheduler = AsyncIOScheduler()
-        scheduler.add_job(
-            self.collect, "interval",
-            minutes=self._cfg.get("poll_cadence_minutes", 5),
-            next_run_time=datetime.utcnow(),
-        )
-        scheduler.add_job(
-            self.evaluate, "interval",
-            minutes=self._cfg.get("eval_cadence_minutes", 2),
-            next_run_time=datetime.utcnow() + timedelta(seconds=30),
-        )
-        scheduler.start()
+        await self.start_worker()
         logger.info("Dolev AI agent started. Press Ctrl+C to stop.")
 
         stop_event = asyncio.Event()
@@ -324,8 +379,7 @@ class Agent:
             pass
         finally:
             web_server.should_exit = True
-            scheduler.shutdown(wait=False)
-            await self._source.stop()
+            await self.stop_worker()
             logger.info("Agent stopped.")
 
 

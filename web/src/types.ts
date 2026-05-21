@@ -80,6 +80,12 @@ export interface HealthInfo {
   subscriber_count: number
 }
 
+export interface AgentStatus {
+  running: boolean
+  started_at: string | null
+  mode: 'dry-run' | 'live'
+}
+
 export interface CollectionProgress {
   active: boolean
   completed: number

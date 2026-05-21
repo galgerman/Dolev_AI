@@ -1,4 +1,4 @@
-import type { Account, HealthInfo, TickerDrilldown, TickerScore, Signal, GraphSnapshot, XAuthStatus } from './types'
+import type { Account, AgentStatus, HealthInfo, TickerDrilldown, TickerScore, Signal, GraphSnapshot, XAuthStatus } from './types'
 
 const BASE = '/api'
 
@@ -21,6 +21,9 @@ export const api = {
   signalsRecent: (limit = 20) => get<Signal[]>(`/signals/recent?limit=${limit}`),
   graphSnapshot: () => get<GraphSnapshot>('/graph/snapshot'),
   accounts: () => get<Account[]>('/accounts'),
+  agentStatus: () => get<AgentStatus>('/agent/status'),
+  agentStart: () => post<AgentStatus & { started: boolean }>('/agent/start'),
+  agentStop: () => post<AgentStatus & { stopped: boolean }>('/agent/stop'),
   xAuthStatus: () => get<XAuthStatus>('/auth/x/status'),
   xAuthLogin: () => post<{ started: boolean; state: string }>('/auth/x/login'),
 }

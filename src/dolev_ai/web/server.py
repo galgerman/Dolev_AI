@@ -28,6 +28,7 @@ def create_app(
     threshold: float = 5.0,
     started_at: datetime | None = None,
     profile_dir: pathlib.Path | None = None,
+    agent_control=None,
 ) -> FastAPI:
     if started_at is None:
         started_at = datetime.utcnow()
@@ -41,6 +42,7 @@ def create_app(
         threshold=threshold,
         get_session=session_factory,
         event_bus=event_bus,
+        agent_control=agent_control,
     )
 
     def _snapshot() -> dict:

@@ -35,14 +35,16 @@ _started_at: datetime = datetime.utcnow()
 _threshold: float = 5.0
 _get_session = None  # injected by server.py
 _event_bus = None    # injected by server.py
+_agent_control = None  # optional local scraper controller
 
 
-def configure(started_at: datetime, threshold: float, get_session, event_bus) -> None:
-    global _started_at, _threshold, _get_session, _event_bus
+def configure(started_at: datetime, threshold: float, get_session, event_bus, agent_control=None) -> None:
+    global _started_at, _threshold, _get_session, _event_bus, _agent_control
     _started_at = started_at
     _threshold = threshold
     _get_session = get_session
     _event_bus = event_bus
+    _agent_control = agent_control
 
 
 def _session() -> Session:
@@ -245,6 +247,32 @@ def accounts():
             credibility=get_credibility(handle),
         ))
     return sorted(result, key=lambda a: (a.tier, a.handle))
+
+
+def _require_agent_control():
+    if _agent_control is None:
+        raise HTTPException(status_code=503, detail="Agent control is not available")
+    return _agent_control
+
+
+@router.get("/agent/status")
+def agent_status():
+    control = _require_agent_control()
+    return control.status()
+
+
+@router.post("/agent/start")
+async def agent_start():
+    control = _require_agent_control()
+    started = await control.start_worker()
+    return {**control.status(), "started": started}
+
+
+@router.post("/agent/stop")
+async def agent_stop():
+    control = _require_agent_control()
+    stopped = await control.stop_worker()
+    return {**control.status(), "stopped": stopped}
 
 
 # ── Auth endpoints ───────────────────────────────────────────────────────────

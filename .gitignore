@@ -27,3 +27,5 @@ browser_profile*_backup*/
 # Misc
 *.log
 .DS_Store
+web/node_modules/.bin/
+web/node_modules/

@@ -5,17 +5,18 @@ import pathlib
 sys.path.insert(0, str(pathlib.Path(__file__).parent.parent / "src"))
 
 import uvicorn
-from dolev_ai.db import init_db
-from dolev_ai.events import EventBus
+from dolev_ai.main import Agent, _load_config
 from dolev_ai.web.server import create_app
 
 db_path = pathlib.Path(__file__).parent.parent / "data" / "dolev.db"
 db_path.parent.mkdir(exist_ok=True)
+agent = Agent(_load_config(), dry_run=True)
 
 app = create_app(
-    event_bus=EventBus(),
-    session_factory=init_db(db_path),
-    threshold=5.0,
+    event_bus=agent.event_bus,
+    session_factory=agent.session_factory,
+    threshold=agent.threshold,
+    agent_control=agent,
 )
 
 if __name__ == "__main__":
