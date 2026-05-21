@@ -17,7 +17,7 @@ export default function App() {
 
   return (
     <div className="flex flex-col h-screen overflow-hidden">
-      <Header wsStatus={wsStatus} threshold={state.threshold} lastEval={lastEval} />
+      <Header wsStatus={wsStatus} threshold={state.threshold} lastEval={lastEval} xAuth={state.xAuth} />
 
       {/* Main grid: 3 columns × 2 rows */}
       <div className="flex-1 min-h-0 grid grid-cols-3 grid-rows-2 gap-3 p-3">

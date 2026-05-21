@@ -66,6 +66,11 @@ export function TrustGraph({ nodes, edges, onTickerClick }: Props) {
       .attr('stroke-opacity', 0.35)
       .attr('stroke-width', d => Math.max(0.5, d.weight * 3))
 
+    const dragBehavior = d3.drag<SVGGElement, GraphNode>()
+      .on('start', (e, d: any) => { if (!e.active) sim.alphaTarget(0.3).restart(); d.fx = d.x; d.fy = d.y })
+      .on('drag', (e, d: any) => { d.fx = e.x; d.fy = e.y })
+      .on('end', (e, d: any) => { if (!e.active) sim.alphaTarget(0); d.fx = null; d.fy = null })
+
     // Nodes
     const node = g.append('g').selectAll('g')
       .data(nodes)
@@ -74,12 +79,7 @@ export function TrustGraph({ nodes, edges, onTickerClick }: Props) {
       .on('click', (_, d) => {
         if (d.type === 'ticker') onTickerClick(d.label.replace('$', ''))
       })
-      .call(
-        d3.drag<SVGGElement, GraphNode>()
-          .on('start', (e, d: any) => { if (!e.active) sim.alphaTarget(0.3).restart(); d.fx = d.x; d.fy = d.y })
-          .on('drag', (e, d: any) => { d.fx = e.x; d.fy = e.y })
-          .on('end', (e, d: any) => { if (!e.active) sim.alphaTarget(0); d.fx = null; d.fy = null })
-      )
+      .call(dragBehavior as any)
 
     node.append('circle')
       .attr('r', nodeRadius)

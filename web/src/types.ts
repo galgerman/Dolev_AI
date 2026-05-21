@@ -90,3 +90,9 @@ export type WsEvent =
   | { type: 'signal.synthesizing'; ticker: string }
   | { type: 'signal.fired'; ticker: string; side: 'buy' | 'sell'; conviction: number; suggested_size_pct: number; rationale: string; key_drivers: string[]; generated_at: string }
   | { type: 'graph.edge_added'; author: string; ticker: string; weight: number; sentiment: string }
+  | { type: 'auth.x.status_changed'; state: 'idle' | 'opening' | 'waiting' | 'complete' | 'error'; logged_in: boolean }
+
+export interface XAuthStatus {
+  state: 'idle' | 'opening' | 'waiting' | 'complete' | 'error'
+  logged_in: boolean
+}

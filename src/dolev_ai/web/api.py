@@ -26,6 +26,7 @@ from dolev_ai.web.schemas import (
 )
 
 router = APIRouter(prefix="/api")
+auth_router = APIRouter(prefix="/api/auth")
 
 SEEDS_PATH = pathlib.Path(__file__).parent.parent.parent.parent / "config" / "seeds.yaml"
 
@@ -246,7 +247,22 @@ def accounts():
     return sorted(result, key=lambda a: (a.tier, a.handle))
 
 
-# ── helpers ──────────────────────────────────────────────────────────────────
+# ── Auth endpoints ───────────────────────────────────────────────────────────
+
+@auth_router.get("/x/status")
+def x_auth_status():
+    from dolev_ai.web import auth as auth_mod
+    return {"state": auth_mod.get_state(), "logged_in": auth_mod.is_logged_in()}
+
+
+@auth_router.post("/x/login")
+async def x_auth_login():
+    from dolev_ai.web import auth as auth_mod
+    started = await auth_mod.start_login()
+    return {"started": started, "state": auth_mod.get_state()}
+
+
+# ── helpers ───────────────────────────────────────────────────────────────────
 
 def _load_seed_handles() -> dict[str, int]:
     if not SEEDS_PATH.exists():

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { api } from '../api'
-import type { GraphEdge, GraphNode, GraphSnapshot, Signal, TickerScore, WsEvent } from '../types'
+import type { GraphEdge, GraphNode, GraphSnapshot, Signal, TickerScore, WsEvent, XAuthStatus } from '../types'
 import { useEventStream } from './useEventStream'
 
 const SCORE_HISTORY_MAX = 120  // keep ~2 hours of 1-min ticks per ticker
@@ -17,6 +17,7 @@ export interface LiveState {
   synthesisingTickers: Set<string>
   lastFiredSignal: Signal | null
   threshold: number
+  xAuth: XAuthStatus
 }
 
 const INITIAL: LiveState = {
@@ -29,6 +30,7 @@ const INITIAL: LiveState = {
   synthesisingTickers: new Set(),
   lastFiredSignal: null,
   threshold: 5.0,
+  xAuth: { state: 'idle', logged_in: false },
 }
 
 export function useLiveTickers() {
@@ -36,10 +38,13 @@ export function useLiveTickers() {
   const stateRef = useRef(state)
   stateRef.current = state
 
-  // Fetch initial threshold from health endpoint
+  // Fetch initial threshold and X auth status
   useEffect(() => {
     api.health().then(h => {
       setState(s => ({ ...s, threshold: h.threshold }))
+    }).catch(() => {})
+    api.xAuthStatus().then(status => {
+      setState(s => ({ ...s, xAuth: status }))
     }).catch(() => {})
   }, [])
 
@@ -150,6 +155,9 @@ export function useLiveTickers() {
             }],
           }
         }
+
+        case 'auth.x.status_changed':
+          return { ...prev, xAuth: { state: event.state, logged_in: event.logged_in } }
 
         default:
           return prev

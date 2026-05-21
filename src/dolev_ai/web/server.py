@@ -12,7 +12,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
 from dolev_ai.events import EventBus
-from dolev_ai.web.api import configure as configure_api
+from dolev_ai.web.api import auth_router, configure as configure_api
 from dolev_ai.web.api import router as api_router
 from dolev_ai.web.ws import configure as configure_ws
 from dolev_ai.web.ws import ws_router
@@ -27,9 +27,14 @@ def create_app(
     session_factory,
     threshold: float = 5.0,
     started_at: datetime | None = None,
+    profile_dir: pathlib.Path | None = None,
 ) -> FastAPI:
     if started_at is None:
         started_at = datetime.utcnow()
+
+    from dolev_ai.web import auth as auth_mod
+    _default_profile = pathlib.Path(__file__).parent.parent.parent.parent / "browser_profile"
+    auth_mod.configure(profile_dir or _default_profile, event_bus)
 
     configure_api(
         started_at=started_at,
@@ -69,6 +74,7 @@ def create_app(
     )
 
     app.include_router(api_router)
+    app.include_router(auth_router)
     app.include_router(ws_router)
 
     # Serve built SPA — graceful if web/dist doesn't exist yet (dev mode)

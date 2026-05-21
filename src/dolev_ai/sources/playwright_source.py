@@ -58,10 +58,24 @@ class PlaywrightSource(TweetSource):
         self._context: BrowserContext | None = None
         self._playwright = None
 
+    @staticmethod
+    def _find_browser() -> str:
+        import os
+        candidates = [
+            r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
+            r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+            r"C:\Program Files\Microsoft\Edge\Application\msedge.exe",
+        ]
+        for path in candidates:
+            if os.path.exists(path):
+                return path
+        raise RuntimeError("Install Microsoft Edge or Google Chrome.")
+
     async def start(self) -> None:
         self._playwright = await async_playwright().start()
         self._context = await self._playwright.chromium.launch_persistent_context(
             self._profile_dir,
+            executable_path=self._find_browser(),
             headless=self._headless,
             args=["--disable-blink-features=AutomationControlled"],
         )
