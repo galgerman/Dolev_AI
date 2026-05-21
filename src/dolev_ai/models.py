@@ -33,6 +33,7 @@ class TickerScore:
     window_start: datetime
     window_end: datetime
     top_tweet_urls: list[str] = field(default_factory=list)
+    threshold_progress: float = 0.0  # abs(score)/threshold ∈ [0, ∞); ≥1.0 means threshold crossed
 
 
 @dataclass

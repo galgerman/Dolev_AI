@@ -61,7 +61,7 @@ def _load_fixtures() -> list[RawTweet]:
 def test_nvda_positive_score():
     tweets = _load_fixtures()
     now = datetime(2024, 1, 15, 15, 0, 0)
-    scores = agg_mod.aggregate(tweets, window_minutes=120, now=now)
+    scores, _ = agg_mod.aggregate(tweets, window_minutes=120, now=now)
     assert "NVDA" in scores
     assert scores["NVDA"].score > 0, "NVDA should have positive score"
 
@@ -69,7 +69,7 @@ def test_nvda_positive_score():
 def test_tsla_negative_score():
     tweets = _load_fixtures()
     now = datetime(2024, 1, 15, 15, 0, 0)
-    scores = agg_mod.aggregate(tweets, window_minutes=120, now=now)
+    scores, _ = agg_mod.aggregate(tweets, window_minutes=120, now=now)
     assert "TSLA" in scores
     assert scores["TSLA"].score < 0, "TSLA should have negative score due to recall"
 
@@ -77,21 +77,22 @@ def test_tsla_negative_score():
 def test_nvda_ranked_higher_magnitude_than_tsla():
     tweets = _load_fixtures()
     now = datetime(2024, 1, 15, 15, 0, 0)
-    scores = agg_mod.aggregate(tweets, window_minutes=120, now=now)
+    scores, _ = agg_mod.aggregate(tweets, window_minutes=120, now=now)
     # NVDA has 3 bullish tweets with high engagement; check it has ≥3 voices
     assert scores["NVDA"].unique_credible_voices >= 3
 
 
 def test_empty_window_returns_empty():
-    scores = agg_mod.aggregate([], window_minutes=60)
+    scores, edges = agg_mod.aggregate([], window_minutes=60)
     assert scores == {}
+    assert edges == []
 
 
 def test_out_of_window_ignored():
     tweets = _load_fixtures()
     # Use a now that puts all fixture tweets outside the window
     now = datetime(2024, 1, 16, 0, 0, 0)  # next day
-    scores = agg_mod.aggregate(tweets, window_minutes=30, now=now)
+    scores, _ = agg_mod.aggregate(tweets, window_minutes=30, now=now)
     assert scores == {}
 
 
