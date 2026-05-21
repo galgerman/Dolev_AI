@@ -80,11 +80,28 @@ export interface HealthInfo {
   subscriber_count: number
 }
 
+export interface CollectionProgress {
+  active: boolean
+  completed: number
+  total: number
+  current_handle: string | null
+  tweets_found: number
+  tickers_found: number
+  last_handle: string | null
+  error?: string
+}
+
 // ── WebSocket events ──────────────────────────────────────────────────────
 
 export type WsEvent =
   | { type: 'snapshot'; top_tickers: TickerScore[]; recent_signals: Signal[]; graph: GraphSnapshot }
+  | { type: 'collection.started'; total: number; completed: number; current_handle: string | null; tweets_found: number; tickers_found: number }
+  | { type: 'collection.account_started'; handle: string; index: number; total: number; completed: number; tweets_found: number; tickers_found: number }
+  | { type: 'collection.account_completed'; handle: string; index: number; total: number; completed: number; account_tweets: number; tweets_found: number; tickers_found: number }
+  | { type: 'collection.finished'; total: number; completed: number; current_handle: string | null; tweets_found: number; tickers_found: number }
+  | { type: 'collection.failed'; message: string }
   | { type: 'tweet.ingested'; id: string; author: string; text: string; created_at: string; url: string; tickers: string[]; sentiment: string; sentiment_score: number }
+  | { type: 'ticker.discovered'; ticker: string; voices: number; tweet_count: number }
   | { type: 'ticker.score_updated'; ticker: string; score: number; voices: number; tweet_count: number; threshold: number; threshold_progress: number }
   | { type: 'ticker.near_threshold'; ticker: string; score: number; threshold: number; percent: number }
   | { type: 'signal.synthesizing'; ticker: string }

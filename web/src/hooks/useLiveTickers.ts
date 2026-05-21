@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { api } from '../api'
-import type { GraphEdge, GraphNode, GraphSnapshot, Signal, TickerScore, WsEvent, XAuthStatus } from '../types'
+import type { CollectionProgress, GraphEdge, GraphNode, GraphSnapshot, Signal, TickerScore, WsEvent, XAuthStatus } from '../types'
 import { useEventStream } from './useEventStream'
 
 const SCORE_HISTORY_MAX = 120  // keep ~2 hours of 1-min ticks per ticker
@@ -18,6 +18,7 @@ export interface LiveState {
   lastFiredSignal: Signal | null
   threshold: number
   xAuth: XAuthStatus
+  collection: CollectionProgress
 }
 
 const INITIAL: LiveState = {
@@ -31,6 +32,45 @@ const INITIAL: LiveState = {
   lastFiredSignal: null,
   threshold: 5.0,
   xAuth: { state: 'idle', logged_in: false },
+  collection: {
+    active: false,
+    completed: 0,
+    total: 0,
+    current_handle: null,
+    tweets_found: 0,
+    tickers_found: 0,
+    last_handle: null,
+  },
+}
+
+function upsertNode(nodes: GraphNode[], node: GraphNode) {
+  const exists = nodes.find(n => n.id === node.id)
+  if (exists) return nodes
+  return [...nodes, node]
+}
+
+function upsertTicker(tickers: TickerScore[], ticker: string, voices: number, tweetCount: number) {
+  const now = new Date().toISOString()
+  const updated = tickers.map(t =>
+    t.ticker === ticker
+      ? {
+          ...t,
+          unique_credible_voices: Math.max(t.unique_credible_voices, voices),
+          tweet_count: Math.max(t.tweet_count, tweetCount),
+        }
+      : t
+  )
+  if (updated.find(t => t.ticker === ticker)) return updated
+  return [...updated, {
+    ticker,
+    score: 0,
+    unique_credible_voices: voices,
+    tweet_count: tweetCount,
+    window_start: now,
+    window_end: now,
+    top_tweet_urls: [],
+    threshold_progress: 0,
+  }]
 }
 
 export function useLiveTickers() {
@@ -65,6 +105,81 @@ export function useLiveTickers() {
             graphEdges: event.graph.edges,
             scoreHistory: history,
           }
+        }
+
+        case 'collection.started':
+          return {
+            ...prev,
+            collection: {
+              active: true,
+              completed: event.completed,
+              total: event.total,
+              current_handle: event.current_handle,
+              tweets_found: event.tweets_found,
+              tickers_found: event.tickers_found,
+              last_handle: null,
+            },
+          }
+
+        case 'collection.account_started':
+          return {
+            ...prev,
+            collection: {
+              ...prev.collection,
+              active: true,
+              completed: event.completed,
+              total: event.total,
+              current_handle: event.handle,
+              tweets_found: event.tweets_found,
+              tickers_found: event.tickers_found,
+              error: undefined,
+            },
+          }
+
+        case 'collection.account_completed':
+          return {
+            ...prev,
+            collection: {
+              ...prev.collection,
+              active: true,
+              completed: event.completed,
+              total: event.total,
+              current_handle: event.completed === event.total ? null : prev.collection.current_handle,
+              tweets_found: event.tweets_found,
+              tickers_found: event.tickers_found,
+              last_handle: event.handle,
+            },
+          }
+
+        case 'collection.finished':
+          return {
+            ...prev,
+            collection: {
+              ...prev.collection,
+              active: false,
+              completed: event.completed,
+              total: event.total,
+              current_handle: null,
+              tweets_found: event.tweets_found,
+              tickers_found: event.tickers_found,
+            },
+          }
+
+        case 'collection.failed':
+          return {
+            ...prev,
+            collection: {
+              ...prev.collection,
+              active: false,
+              current_handle: null,
+              error: event.message,
+            },
+          }
+
+        case 'ticker.discovered': {
+          const tickers = upsertTicker(prev.tickers, event.ticker, event.voices, event.tweet_count)
+            .sort((a, b) => Math.abs(b.score) - Math.abs(a.score) || b.tweet_count - a.tweet_count)
+          return { ...prev, tickers: tickers.slice(0, 20) }
         }
 
         case 'ticker.score_updated': {
@@ -135,9 +250,29 @@ export function useLiveTickers() {
           const exists = prev.graphEdges.find(
             e => e.source === `acct:${event.author}` && e.target === `ticker:${event.ticker}`
           )
+          const accountNode: GraphNode = {
+            id: `acct:${event.author}`,
+            type: 'account',
+            label: `@${event.author}`,
+            size: Math.min(1, Math.max(0.3, event.weight)),
+            sentiment: 'neutral',
+            tier: 3,
+          }
+          const tickerNode: GraphNode = {
+            id: `ticker:${event.ticker}`,
+            type: 'ticker',
+            label: `$${event.ticker}`,
+            size: 0.25,
+            sentiment: event.sentiment,
+            tier: 0,
+          }
+          let graphNodes = upsertNode(prev.graphNodes, accountNode)
+          graphNodes = upsertNode(graphNodes, tickerNode)
+
           if (exists) {
             return {
               ...prev,
+              graphNodes,
               graphEdges: prev.graphEdges.map(e =>
                 e.source === `acct:${event.author}` && e.target === `ticker:${event.ticker}`
                   ? { ...e, weight: e.weight + event.weight }
@@ -147,6 +282,7 @@ export function useLiveTickers() {
           }
           return {
             ...prev,
+            graphNodes,
             graphEdges: [...prev.graphEdges, {
               source: `acct:${event.author}`,
               target: `ticker:${event.ticker}`,

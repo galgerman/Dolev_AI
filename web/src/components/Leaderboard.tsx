@@ -37,8 +37,9 @@ export function Leaderboard({ tickers, pulsing, synthesising, onSelect, selected
           <p className="text-gray-600 text-xs py-4 text-center">Waiting for first eval cycle…</p>
         )}
         {tickers.map(t => {
-          const side = t.score > 0 ? 'buy' : 'sell'
+          const side = t.score >= 0 ? 'buy' : 'sell'
           const pct = Math.round(t.threshold_progress * 100)
+          const isProvisional = t.score === 0 && t.threshold_progress === 0
           const isPulsing = pulsing.has(t.ticker)
           const isSynthesising = synthesising.has(t.ticker)
           const isSelected = selected === t.ticker
@@ -56,15 +57,15 @@ export function Leaderboard({ tickers, pulsing, synthesising, onSelect, selected
                 <div className="flex items-center gap-2">
                   <span className={clsx(
                     'font-bold text-sm',
-                    t.score > 0 ? 'text-green-400' : 'text-red-400'
+                    isProvisional ? 'text-blue-300' : t.score > 0 ? 'text-green-400' : 'text-red-400'
                   )}>
                     ${t.ticker}
                   </span>
                   <span className={clsx(
                     'text-xs',
-                    t.score > 0 ? 'text-green-500' : 'text-red-500'
+                    isProvisional ? 'text-gray-500' : t.score > 0 ? 'text-green-500' : 'text-red-500'
                   )}>
-                    {t.score > 0 ? '↑' : '↓'} {Math.abs(t.score).toFixed(2)}
+                    {isProvisional ? 'queued' : `${t.score > 0 ? '↑' : '↓'} ${Math.abs(t.score).toFixed(2)}`}
                   </span>
                   {isSynthesising && (
                     <span className="text-xs text-purple-400 animate-pulse">⚙ synthesising…</span>

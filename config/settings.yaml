@@ -29,7 +29,7 @@ universe:
 
 playwright:
   headless: false              # keep true=headless; false helps debug & avoids bot detection
-  profile_dir: browser_profile
+  profile_dir: browser_profile_chrome
   request_delay_min_s: 3.0
   request_delay_max_s: 6.0
   max_accounts_per_poll: 50

@@ -1,13 +1,14 @@
 import { useState } from 'react'
 import { api } from '../api'
 import type { ConnectionStatus } from '../hooks/useEventStream'
-import type { XAuthStatus } from '../types'
+import type { CollectionProgress, XAuthStatus } from '../types'
 
 interface Props {
   wsStatus: ConnectionStatus
   threshold: number
   lastEval?: string
   xAuth: XAuthStatus
+  collection: CollectionProgress
 }
 
 const STATUS_COLORS: Record<ConnectionStatus, string> = {
@@ -24,7 +25,7 @@ const STATE_LABEL: Record<XAuthStatus['state'], string> = {
   error: 'Retry login',
 }
 
-export function Header({ wsStatus, threshold, lastEval, xAuth }: Props) {
+export function Header({ wsStatus, threshold, lastEval, xAuth, collection }: Props) {
   const [busy, setBusy] = useState(false)
 
   async function handleLogin() {
@@ -52,6 +53,18 @@ export function Header({ wsStatus, threshold, lastEval, xAuth }: Props) {
       <div className="flex items-center gap-5 text-xs text-gray-400">
         <span>threshold <span className="text-white font-semibold">{threshold.toFixed(1)}</span></span>
         {lastEval && <span>last eval <span className="text-gray-300">{lastEval}</span></span>}
+        {collection.total > 0 && (
+          <span className="min-w-[260px] text-gray-500">
+            scrape{' '}
+            <span className="text-gray-300">{collection.completed}/{collection.total}</span>
+            {' '}acct
+            {collection.current_handle && (
+              <span> · <span className="text-blue-300">@{collection.current_handle}</span></span>
+            )}
+            <span> · <span className="text-gray-300">{collection.tweets_found}</span> tweets</span>
+            <span> · <span className="text-gray-300">{collection.tickers_found}</span> tickers</span>
+          </span>
+        )}
 
         {/* X login button */}
         <button

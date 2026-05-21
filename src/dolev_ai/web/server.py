@@ -33,7 +33,7 @@ def create_app(
         started_at = datetime.utcnow()
 
     from dolev_ai.web import auth as auth_mod
-    _default_profile = pathlib.Path(__file__).parent.parent.parent.parent / "browser_profile"
+    _default_profile = pathlib.Path(__file__).parent.parent.parent.parent / "browser_profile_chrome"
     auth_mod.configure(profile_dir or _default_profile, event_bus)
 
     configure_api(

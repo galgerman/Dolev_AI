@@ -1,12 +1,12 @@
 """Open a headful Chromium window so the user can log in to X.com once.
 
-The session is stored in browser_profile/ (gitignored).
+The session is stored in browser_profile_chrome/ (gitignored).
 Run this script once before starting the agent daemon.
 """
 import pathlib
 from playwright.sync_api import sync_playwright
 
-PROFILE_DIR = pathlib.Path(__file__).parent.parent / "browser_profile"
+PROFILE_DIR = pathlib.Path(__file__).parent.parent / "browser_profile_chrome"
 
 
 def main() -> None:

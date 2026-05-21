@@ -30,6 +30,11 @@ from dolev_ai.db import (
     save_tweets,
 )
 from dolev_ai.events import EventBus
+from dolev_ai.live_events import (
+    build_graph_edge_events,
+    build_ticker_discovered_events,
+    build_tweet_ingested_events,
+)
 from dolev_ai.models import Signal
 from dolev_ai.sources.playwright_source import PlaywrightSource
 from dolev_ai.strategies.trust_graph import TrustGraphStrategy
@@ -44,7 +49,7 @@ logger = logging.getLogger(__name__)
 
 CONFIG_PATH = pathlib.Path(__file__).parent.parent.parent / "config" / "settings.yaml"
 SEEDS_PATH = pathlib.Path(__file__).parent.parent.parent / "config" / "seeds.yaml"
-PROFILE_DIR = pathlib.Path(__file__).parent.parent.parent / "browser_profile"
+PROFILE_DIR = pathlib.Path(__file__).parent.parent.parent / "browser_profile_chrome"
 
 
 def _load_config() -> dict:
@@ -97,7 +102,51 @@ class Agent:
         )
         logger.info(f"Collecting from {len(self._handles)} accounts since {since:%H:%M}…")
         try:
-            tweets = await self._source.fetch_feed_engagements(self._handles, since)
+            tweets = []
+            discovered_tickers: set[str] = set()
+            await self._event_bus.publish({
+                "type": "collection.started",
+                "total": len(self._handles),
+                "completed": 0,
+                "current_handle": None,
+                "tweets_found": 0,
+                "tickers_found": 0,
+            })
+            for index, handle in enumerate(self._handles, start=1):
+                await self._event_bus.publish({
+                    "type": "collection.account_started",
+                    "handle": handle,
+                    "index": index,
+                    "total": len(self._handles),
+                    "completed": index - 1,
+                    "tweets_found": len(tweets),
+                    "tickers_found": len(discovered_tickers),
+                })
+
+                account_tweets = await self._source.fetch_feed_engagements([handle], since)
+                tweets.extend(account_tweets)
+
+                live_events = (
+                    build_tweet_ingested_events(account_tweets)
+                    + build_graph_edge_events(account_tweets)
+                    + build_ticker_discovered_events(account_tweets)
+                )
+                for event in live_events:
+                    if event["type"] == "ticker.discovered":
+                        discovered_tickers.add(event["ticker"])
+                    await self._event_bus.publish(event)
+
+                await self._event_bus.publish({
+                    "type": "collection.account_completed",
+                    "handle": handle,
+                    "index": index,
+                    "total": len(self._handles),
+                    "completed": index,
+                    "account_tweets": len(account_tweets),
+                    "tweets_found": len(tweets),
+                    "tickers_found": len(discovered_tickers),
+                })
+
             with self._session_factory() as session:
                 added = save_tweets(session, tweets)
 
@@ -124,8 +173,20 @@ class Agent:
                         })
 
             logger.info(f"  Saved {added} new tweets (fetched {len(tweets)})")
+            await self._event_bus.publish({
+                "type": "collection.finished",
+                "total": len(self._handles),
+                "completed": len(self._handles),
+                "current_handle": None,
+                "tweets_found": len(tweets),
+                "tickers_found": len(discovered_tickers),
+            })
         except Exception as e:
             logger.error(f"Collect failed: {e}", exc_info=True)
+            await self._event_bus.publish({
+                "type": "collection.failed",
+                "message": str(e),
+            })
 
     async def evaluate(self) -> None:
         """Score tickers, apply strategy, synthesize and send alerts. Publishes score/signal events."""
