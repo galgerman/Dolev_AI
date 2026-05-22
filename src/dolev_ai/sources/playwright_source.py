@@ -162,7 +162,7 @@ class PlaywrightSource(TweetSource):
         assert self._context, "Call start() first"
         page = await self._context.new_page()
         try:
-            await page.goto(f"https://x.com/{handle}", wait_until="domcontentloaded")
+            await page.goto(f"https://x.com/{handle}", wait_until="domcontentloaded", timeout=15000)
             await self._delay()
             return await self._parse_tweets_on_page(page, since)
         finally:
@@ -180,6 +180,7 @@ class PlaywrightSource(TweetSource):
                 await page.goto(
                     f"https://x.com/{handle}/with_replies",
                     wait_until="domcontentloaded",
+                    timeout=15000,
                 )
                 await self._delay()
                 tweets = await self._parse_tweets_on_page(page, since)

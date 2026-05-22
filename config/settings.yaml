@@ -29,9 +29,9 @@ universe:
   refresh_days: 7              # re-download symbol list every N days
 
 playwright:
-  headless: false              # keep true=headless; false helps debug & avoids bot detection
+  headless: true               # run silently in background
   profile_dir: browser_profile_chrome
-  request_delay_min_s: 3.0
-  request_delay_max_s: 6.0
-  max_accounts_per_poll: 50
-  scroll_count: 3              # number of scrolls per timeline page
+  request_delay_min_s: 1.0
+  request_delay_max_s: 2.0
+  max_accounts_per_poll: 10
+  scroll_count: 1              # number of scrolls per timeline page
