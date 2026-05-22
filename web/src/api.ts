@@ -8,7 +8,9 @@ import type {
   GraphSnapshot,
   HealthInfo,
   LLMStatus,
+  PaperPosition,
   Signal,
+  SignalApproval,
   ThemeScore,
   TickerDrilldown,
   TickerScore,
@@ -59,4 +61,14 @@ export const api = {
     get<DBPage>(`/db/graph_edges?limit=${limit}&offset=${offset}`),
   dbSignals: (limit = 50, offset = 0) =>
     get<DBPage>(`/db/signals?limit=${limit}&offset=${offset}`),
+  positionsOpen: () => get<PaperPosition[]>('/positions/open'),
+  positionsClosed: (days = 7) => get<PaperPosition[]>(`/positions/closed?days=${days}`),
+  approvalsPending: () => get<SignalApproval[]>('/approvals/pending'),
+  approvalDecide: (id: number, decision: 'approved' | 'rejected') => {
+    return fetch(`${BASE}/approvals/${id}/decide`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ decision }),
+    }).then(r => { if (!r.ok) throw new Error(`POST ${r.url} → ${r.status}`); return r.json() as Promise<{ ack: string }> })
+  },
 }

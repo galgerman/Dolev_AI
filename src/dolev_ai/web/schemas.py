@@ -187,3 +187,31 @@ class DBTableRowOut(BaseModel):
     id: int | str
     fields: dict
 
+
+class PaperPositionOut(BaseModel):
+    id: int
+    ticker: str
+    side: str
+    entry_price: float
+    opened_at: datetime
+    exit_price: float | None = None
+    closed_at: datetime | None = None
+    pnl_pct: float | None = None
+    status: str
+    retrospective: str | None = None
+    live_price: float | None = None
+    unrealized_pnl_pct: float | None = None
+
+
+class SignalApprovalOut(BaseModel):
+    id: int
+    signal_id: int
+    kind: str
+    position_id: int | None = None
+    telegram_message_id: int | None = None
+    status: str
+    prompted_at: datetime
+    responded_at: datetime | None = None
+    ticker: str = ""
+    side: str = ""
+

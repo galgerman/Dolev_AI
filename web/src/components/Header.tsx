@@ -14,6 +14,7 @@ interface Props {
   extractionBacklog: { depth: number; capacity: number; dropped_total: number }
   lastLlmCall?: { ts: number; latency_ms: number; is_finance: boolean } | null
   onOpenDB: () => void
+  onOpenPortfolio: () => void
 }
 
 const STATUS_COLORS: Record<ConnectionStatus, string> = {
@@ -30,7 +31,7 @@ const STATE_LABEL: Record<XAuthStatus['state'], string> = {
   error: 'Retry login',
 }
 
-export function Header({ wsStatus, threshold, lastEval, xAuth, collection, llmStatus, extractionBacklog, lastLlmCall, onOpenDB }: Props) {
+export function Header({ wsStatus, threshold, lastEval, xAuth, collection, llmStatus, extractionBacklog, lastLlmCall, onOpenDB, onOpenPortfolio }: Props) {
   const [busy, setBusy] = useState(false)
   const [agentBusy, setAgentBusy] = useState(false)
   const [agentStatus, setAgentStatus] = useState<AgentStatus | null>(null)
@@ -98,6 +99,13 @@ export function Header({ wsStatus, threshold, lastEval, xAuth, collection, llmSt
 
       <div className="flex items-center justify-end gap-3 text-xs text-gray-400 min-w-0">
         <LLMStatusBadge status={llmStatus} backlog={extractionBacklog} lastCall={lastLlmCall} />
+        <button
+          onClick={onOpenPortfolio}
+          className="px-2 py-0.5 rounded bg-gray-800 hover:bg-gray-700 text-gray-300 text-[11px]"
+          title="Paper portfolio & approvals"
+        >
+          📋 Portfolio
+        </button>
         <button
           onClick={onOpenDB}
           className="px-2 py-0.5 rounded bg-gray-800 hover:bg-gray-700 text-gray-300 text-[11px]"

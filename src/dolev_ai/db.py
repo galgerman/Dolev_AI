@@ -76,6 +76,35 @@ class AlertLogRow(Base):
     channel = Column(String, default="telegram")
 
 
+class PaperPositionRow(Base):
+    __tablename__ = "paper_positions"
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    ticker = Column(String, nullable=False, index=True)
+    side = Column(String, nullable=False)           # 'buy' | 'sell'
+    entry_signal_id = Column(Integer, nullable=False)
+    entry_price = Column(Float, nullable=False)
+    opened_at = Column(DateTime, default=datetime.utcnow, index=True)
+    exit_signal_id = Column(Integer, nullable=True)
+    exit_price = Column(Float, nullable=True)
+    closed_at = Column(DateTime, nullable=True)
+    pnl_pct = Column(Float, nullable=True)
+    status = Column(String, default="open")         # 'open' | 'closed'
+    retrospective = Column(Text, nullable=True)
+    retrospective_at = Column(DateTime, nullable=True)
+
+
+class SignalApprovalRow(Base):
+    __tablename__ = "signal_approvals"
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    signal_id = Column(Integer, nullable=False, index=True)
+    kind = Column(String, nullable=False)           # 'open' | 'close'
+    position_id = Column(Integer, nullable=True)
+    telegram_message_id = Column(Integer, nullable=True)
+    status = Column(String, default="pending", index=True)  # pending|approved|rejected|expired
+    prompted_at = Column(DateTime, default=datetime.utcnow, index=True)
+    responded_at = Column(DateTime, nullable=True)
+
+
 # ── LLM extraction tables ────────────────────────────────────────────────
 
 class ExtractionRow(Base):
@@ -185,16 +214,19 @@ def save_ticker_score(session: Session, ts: TickerScore) -> None:
     session.commit()
 
 
-def save_signal(session: Session, sig: Signal) -> None:
-    session.add(SignalRow(
+def save_signal(session: Session, sig: Signal) -> int:
+    """Persist a Signal and return its DB row id."""
+    row = SignalRow(
         ticker=sig.ticker, side=sig.side,
         conviction=sig.conviction,
         suggested_size_pct=sig.suggested_size_pct,
         rationale=sig.rationale,
         key_drivers=json.dumps(sig.key_drivers),
         generated_at=sig.generated_at,
-    ))
+    )
+    session.add(row)
     session.commit()
+    return row.id
 
 
 def last_alert_time(session: Session, ticker: str) -> datetime | None:
@@ -331,6 +363,90 @@ def prune_old_data(
 def vacuum_db(session: Session) -> None:
     """Reclaim space after big deletes. SQLite-only."""
     session.execute(text("VACUUM"))
+
+
+# ── Paper trading helpers ─────────────────────────────────────────────────────
+
+def open_positions(session: Session) -> list[PaperPositionRow]:
+    return session.query(PaperPositionRow).filter(PaperPositionRow.status == "open").all()
+
+
+def position_for_ticker(session: Session, ticker: str) -> PaperPositionRow | None:
+    return (
+        session.query(PaperPositionRow)
+        .filter(PaperPositionRow.ticker == ticker, PaperPositionRow.status == "open")
+        .order_by(PaperPositionRow.opened_at.desc())
+        .first()
+    )
+
+
+def save_pending_approval(
+    session: Session,
+    kind: str,
+    signal_id: int,
+    position_id: int | None = None,
+) -> int:
+    row = SignalApprovalRow(kind=kind, signal_id=signal_id, position_id=position_id)
+    session.add(row)
+    session.commit()
+    return row.id
+
+
+def set_approval_message_id(session: Session, approval_id: int, msg_id: int) -> None:
+    row = session.get(SignalApprovalRow, approval_id)
+    if row:
+        row.telegram_message_id = msg_id
+        session.commit()
+
+
+def update_approval_status(session: Session, approval_id: int, status: str) -> None:
+    row = session.get(SignalApprovalRow, approval_id)
+    if row:
+        row.status = status
+        row.responded_at = datetime.utcnow()
+        session.commit()
+
+
+def pending_approvals_older_than(session: Session, cutoff: datetime) -> list[SignalApprovalRow]:
+    return (
+        session.query(SignalApprovalRow)
+        .filter(SignalApprovalRow.status == "pending", SignalApprovalRow.prompted_at < cutoff)
+        .all()
+    )
+
+
+def get_approval(session: Session, approval_id: int) -> SignalApprovalRow | None:
+    return session.get(SignalApprovalRow, approval_id)
+
+
+def positions_opened_on(session: Session, day: datetime) -> list[PaperPositionRow]:
+    start = day.replace(hour=0, minute=0, second=0, microsecond=0)
+    end = start.replace(hour=23, minute=59, second=59)
+    return (
+        session.query(PaperPositionRow)
+        .filter(PaperPositionRow.opened_at >= start, PaperPositionRow.opened_at <= end)
+        .all()
+    )
+
+
+def positions_closed_on(session: Session, day: datetime) -> list[PaperPositionRow]:
+    start = day.replace(hour=0, minute=0, second=0, microsecond=0)
+    end = start.replace(hour=23, minute=59, second=59)
+    return (
+        session.query(PaperPositionRow)
+        .filter(PaperPositionRow.closed_at >= start, PaperPositionRow.closed_at <= end)
+        .all()
+    )
+
+
+def approvals_on(session: Session, day: datetime) -> list[SignalApprovalRow]:
+    start = day.replace(hour=0, minute=0, second=0, microsecond=0)
+    end = start.replace(hour=23, minute=59, second=59)
+    return (
+        session.query(SignalApprovalRow)
+        .filter(SignalApprovalRow.prompted_at >= start, SignalApprovalRow.prompted_at <= end)
+        .all()
+    )
 
 
 def load_extractions_since(session: Session, since: datetime) -> list:

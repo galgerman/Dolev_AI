@@ -28,6 +28,17 @@ synth:
 universe:
   refresh_days: 7              # re-download symbol list every N days
 
+paper_trading:
+  enabled: true
+  approval_timeout_minutes: 15
+  price_cache_seconds: 60
+
+eod_summary:
+  enabled: true
+  cron_hour_utc: 21            # 16:00 ET = 21:00 UTC
+  cron_minute: 0
+  days: mon-fri
+
 playwright:
   headless: true               # run silently in background
   profile_dir: browser_profile_chrome

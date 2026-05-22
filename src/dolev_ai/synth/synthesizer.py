@@ -115,3 +115,29 @@ class Synthesizer:
                         key_drivers=ts.top_tweet_urls[:5],
                         generated_at=datetime.utcnow(),
                     )
+
+    def analyze_retrospective(self, position) -> str:
+        """2-3 sentence post-mortem on whether a closed paper trade was good and why."""
+        direction = "profit" if (position.pnl_pct or 0) >= 0 else "loss"
+        pnl_str = f"{(position.pnl_pct or 0):+.2%}"
+        prompt = (
+            f"A paper trade was just closed:\n"
+            f"  Ticker: ${position.ticker}\n"
+            f"  Side: {position.side}\n"
+            f"  Entry: ${position.entry_price:.2f}  Exit: ${position.exit_price:.2f}\n"
+            f"  P&L: {pnl_str} ({direction})\n"
+            f"  Held from {position.opened_at} to {position.closed_at}\n\n"
+            f"In 2-3 sentences, evaluate whether this was a good trade decision. "
+            f"What likely went right or wrong? What would you watch for next time? "
+            f"Be concise and direct."
+        )
+        try:
+            response = self._client.messages.create(
+                model=self._model,
+                max_tokens=200,
+                messages=[{"role": "user", "content": prompt}],
+            )
+            return response.content[0].text.strip()
+        except Exception as e:
+            logger.warning(f"Retrospective failed for {position.ticker}: {e}")
+            return f"Trade closed at {pnl_str}. Retrospective unavailable."

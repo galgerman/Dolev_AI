@@ -17,20 +17,29 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from dolev_ai.alert.telegram import TelegramAlerter
+from dolev_ai.alert.telegram_bot import TelegramBot
+import dolev_ai.paper_trade as paper_trade
 from dolev_ai.analysis.aggregator import ExtractionRecord, aggregate
 from dolev_ai.analysis.extractor import ExtractionWorker
 from dolev_ai.db import (
+    PaperPositionRow,
+    SignalApprovalRow,
     init_db,
     last_alert_time,
     load_extractions_since,
     log_alert,
+    pending_approvals_older_than,
     prune_old_data,
     save_graph_edge,
+    save_pending_approval,
     save_signal,
     save_theme_score,
     save_ticker_score,
     save_tweets,
+    set_approval_message_id,
+    update_approval_status,
 )
+from dolev_ai.eod import build_eod_summary
 from dolev_ai.events import EventBus
 from dolev_ai.live_events import (
     build_graph_edge_events,
@@ -81,7 +90,10 @@ class Agent:
         )
         self._handles = _load_seed_handles()
         self._alerter = TelegramAlerter(dry_run=dry_run)
+        self._bot = TelegramBot(dry_run=dry_run, on_callback=self._on_tg_callback)
         self._threshold = cfg.get("trust_graph", {}).get("score_threshold", 5.0)
+        pt_cfg = cfg.get("paper_trading", {})
+        self._approval_timeout_minutes = pt_cfg.get("approval_timeout_minutes", 15)
         self._synthesizer = Synthesizer(
             model=cfg.get("synth", {}).get("model", "claude-sonnet-4-6"),
             cache_system_prompt=cfg.get("synth", {}).get("cache_system_prompt", True),
@@ -125,6 +137,41 @@ class Agent:
             "started_at": self._worker_started_at.isoformat() if self._worker_started_at else None,
             "mode": "dry-run" if self._dry_run else "live",
         }
+
+    async def _on_tg_callback(self, approval_id: int, decision: str) -> None:
+        """Called by TelegramBot when a user taps an inline button."""
+        with self._session_factory() as session:
+            ack = await paper_trade.handle_approval_callback(
+                approval_id, decision, session, self._event_bus, self._synthesizer
+            )
+            approval = session.get(SignalApprovalRow, approval_id)
+            if approval and approval.telegram_message_id:
+                await self._bot.edit_message(approval.telegram_message_id, ack)
+            logger.info(f"Approval {approval_id} → {decision}: {ack}")
+
+    async def expire_approvals(self) -> None:
+        """Mark pending approvals older than timeout as expired."""
+        from datetime import timedelta
+        cutoff = datetime.utcnow() - timedelta(minutes=self._approval_timeout_minutes)
+        with self._session_factory() as session:
+            stale = pending_approvals_older_than(session, cutoff)
+            for approval in stale:
+                ack = await paper_trade.handle_approval_callback(
+                    approval.id, "expired", session, self._event_bus, self._synthesizer
+                )
+                if approval.telegram_message_id:
+                    await self._bot.edit_message(approval.telegram_message_id, ack)
+                logger.info(f"Expired approval {approval.id} for signal {approval.signal_id}")
+
+    async def send_eod_summary(self) -> None:
+        """Send end-of-day summary via Telegram."""
+        try:
+            with self._session_factory() as session:
+                summary = build_eod_summary(session, datetime.utcnow())
+            await self._bot.send_text(summary)
+            logger.info("EOD summary sent.")
+        except Exception as e:
+            logger.error(f"EOD summary failed: {e}", exc_info=True)
 
     def llm_status(self) -> dict:
         cfg = self._active_model_cfg or {}
@@ -171,6 +218,7 @@ class Agent:
                 return False
 
             await self._source.start()
+            await self._bot.start()
             await self._ensure_extractor()
 
             scheduler = AsyncIOScheduler()
@@ -190,6 +238,17 @@ class Agent:
                 minutes=ret.get("prune_interval_minutes", 60),
                 next_run_time=datetime.utcnow() + timedelta(minutes=5),
             )
+            # Approval expiry — every minute
+            scheduler.add_job(self.expire_approvals, "interval", minutes=1)
+            # EOD summary — weekdays at 21:00 UTC (16:00 ET)
+            eod_cfg = self._cfg.get("eod_summary", {}) or {}
+            if eod_cfg.get("enabled", True):
+                scheduler.add_job(
+                    self.send_eod_summary, "cron",
+                    day_of_week=eod_cfg.get("days", "mon-fri"),
+                    hour=eod_cfg.get("cron_hour_utc", 21),
+                    minute=eod_cfg.get("cron_minute", 0),
+                )
             scheduler.start()
             self._scheduler = scheduler
             self._worker_started_at = datetime.utcnow()
@@ -205,6 +264,7 @@ class Agent:
             self._scheduler = None
             self._worker_started_at = None
             scheduler.shutdown(wait=False)
+            await self._bot.stop()
             await self._source.stop()
             if self._extractor is not None:
                 await self._extractor.stop()
@@ -477,12 +537,30 @@ class Agent:
                 sig.ticker, ts, tweet_texts, themes=relevant_themes
             )
             with self._session_factory() as session:
-                save_signal(session, enriched)
-                ok = self._alerter.send(enriched)
-                if ok:
-                    log_alert(session, enriched)
-                    logger.info(f"Alert sent: {enriched.side.upper()} ${enriched.ticker} "
-                                f"(conviction={enriched.conviction:.2f})")
+                signal_id = save_signal(session, enriched)
+                log_alert(session, enriched)
+
+                # Route through paper-trade approval flow
+                action = paper_trade.handle_signal(enriched, session)
+                if action.kind == paper_trade.ActionKind.PROPOSE_OPEN:
+                    approval_id = save_pending_approval(session, "open", signal_id)
+                    msg_id = await self._bot.send_open_prompt(enriched, approval_id)
+                    if msg_id:
+                        set_approval_message_id(session, approval_id, msg_id)
+                    logger.info(f"Approval prompt sent for {enriched.side.upper()} ${enriched.ticker}")
+                elif action.kind == paper_trade.ActionKind.PROPOSE_CLOSE:
+                    approval_id = save_pending_approval(
+                        session, "close", signal_id,
+                        position_id=action.position.id if action.position else None
+                    )
+                    msg_id = await self._bot.send_close_prompt(
+                        action.position, enriched, approval_id
+                    )
+                    if msg_id:
+                        set_approval_message_id(session, approval_id, msg_id)
+                    logger.info(f"Close-approval prompt sent for ${enriched.ticker}")
+                else:
+                    logger.info(f"Signal no-op for ${enriched.ticker} (position same-side)")
 
             await self._event_bus.publish({
                 "type": "signal.fired",

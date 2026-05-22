@@ -34,6 +34,8 @@ from dolev_ai.web.schemas import (
     GraphSnapshotOut,
     HealthOut,
     LLMStatusOut,
+    PaperPositionOut,
+    SignalApprovalOut,
     SignalOut,
     ThemeMentionOut,
     ThemeScoreOut,
@@ -632,6 +634,89 @@ def db_signals(limit: int = 50, offset: int = 0, db: Session = Depends(_session)
             "generated_at": r.generated_at.isoformat(),
         } for r in rows],
     }
+
+
+# ── Paper trading endpoints ───────────────────────────────────────────────────
+
+@router.get("/positions/open", response_model=list[PaperPositionOut])
+def positions_open(db: Session = Depends(_session)):
+    from dolev_ai.db import open_positions
+    from dolev_ai.prices import get_price
+    from dolev_ai.paper_trade import compute_pnl_pct
+    rows = open_positions(db)
+    out = []
+    for r in rows:
+        live = get_price(r.ticker)
+        unrealized = compute_pnl_pct(r.entry_price, live, r.side) if live else None
+        out.append(PaperPositionOut(
+            id=r.id, ticker=r.ticker, side=r.side,
+            entry_price=r.entry_price, opened_at=r.opened_at,
+            status=r.status, live_price=live, unrealized_pnl_pct=unrealized,
+        ))
+    return out
+
+
+@router.get("/positions/closed", response_model=list[PaperPositionOut])
+def positions_closed(days: int = 7, db: Session = Depends(_session)):
+    from dolev_ai.db import PaperPositionRow
+    cutoff = datetime.utcnow() - timedelta(days=days)
+    rows = (
+        db.query(PaperPositionRow)
+        .filter(PaperPositionRow.status == "closed", PaperPositionRow.closed_at >= cutoff)
+        .order_by(PaperPositionRow.closed_at.desc())
+        .all()
+    )
+    return [
+        PaperPositionOut(
+            id=r.id, ticker=r.ticker, side=r.side,
+            entry_price=r.entry_price, opened_at=r.opened_at,
+            exit_price=r.exit_price, closed_at=r.closed_at,
+            pnl_pct=r.pnl_pct, status=r.status, retrospective=r.retrospective,
+        )
+        for r in rows
+    ]
+
+
+@router.get("/approvals/pending", response_model=list[SignalApprovalOut])
+def approvals_pending(db: Session = Depends(_session)):
+    from dolev_ai.db import SignalApprovalRow, SignalRow
+    rows = db.query(SignalApprovalRow).filter(SignalApprovalRow.status == "pending").all()
+    out = []
+    for r in rows:
+        sig = db.get(SignalRow, r.signal_id)
+        out.append(SignalApprovalOut(
+            id=r.id, signal_id=r.signal_id, kind=r.kind,
+            position_id=r.position_id, telegram_message_id=r.telegram_message_id,
+            status=r.status, prompted_at=r.prompted_at, responded_at=r.responded_at,
+            ticker=sig.ticker if sig else "",
+            side=sig.side if sig else "",
+        ))
+    return out
+
+
+@router.post("/approvals/{approval_id}/decide")
+async def approval_decide(approval_id: int, body: dict, db: Session = Depends(_session)):
+    decision = body.get("decision", "rejected")
+    if decision not in ("approved", "rejected"):
+        raise HTTPException(400, "decision must be 'approved' or 'rejected'")
+    import dolev_ai.paper_trade as pt
+    event_bus = _event_bus
+    synthesizer = _agent_control._synthesizer if _agent_control else None
+    ack = await pt.handle_approval_callback(approval_id, decision, db, event_bus, synthesizer)
+    # Edit TG message if possible
+    if _agent_control and hasattr(_agent_control, "_bot"):
+        from dolev_ai.db import get_approval
+        approval = get_approval(db, approval_id)
+        if approval and approval.telegram_message_id:
+            await _agent_control._bot.edit_message(approval.telegram_message_id, ack)
+    return {"ack": ack}
+
+
+@router.get("/eod/preview")
+def eod_preview(db: Session = Depends(_session)):
+    """Debug: get current EOD summary as plain text without sending."""
+    from dolev_ai.eod import build_eod_summary
+    return {"summary": build_eod_summary(db)}
 
 
 # ── helpers ───────────────────────────────────────────────────────────────────

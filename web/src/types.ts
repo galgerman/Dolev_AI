@@ -215,3 +215,31 @@ export interface XAuthStatus {
   state: 'idle' | 'opening' | 'waiting' | 'complete' | 'error'
   logged_in: boolean
 }
+
+export interface PaperPosition {
+  id: number
+  ticker: string
+  side: 'buy' | 'sell'
+  entry_price: number
+  opened_at: string
+  exit_price?: number | null
+  closed_at?: string | null
+  pnl_pct?: number | null
+  status: 'open' | 'closed'
+  retrospective?: string | null
+  live_price?: number | null
+  unrealized_pnl_pct?: number | null
+}
+
+export interface SignalApproval {
+  id: number
+  signal_id: number
+  kind: 'open' | 'close'
+  position_id?: number | null
+  telegram_message_id?: number | null
+  status: 'pending' | 'approved' | 'rejected' | 'expired'
+  prompted_at: string
+  responded_at?: string | null
+  ticker: string
+  side: string
+}

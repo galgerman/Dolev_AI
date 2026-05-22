@@ -3,6 +3,7 @@ import { DBBrowser } from './components/DBBrowser'
 import { ExtractionFeed } from './components/ExtractionFeed'
 import { Header } from './components/Header'
 import { Leaderboard } from './components/Leaderboard'
+import { PaperPortfolio } from './components/PaperPortfolio'
 import { ScoreChart } from './components/ScoreChart'
 import { SignalFiredToast } from './components/SignalFiredToast'
 import { TickerDrilldown } from './components/TickerDrilldown'
@@ -13,6 +14,7 @@ export default function App() {
   const { state, wsStatus } = useLiveTickers()
   const [selectedTicker, setSelectedTicker] = useState<string | null>(null)
   const [showDB, setShowDB] = useState(false)
+  const [showPortfolio, setShowPortfolio] = useState(false)
 
   const lastEval = state.tickers[0]?.window_end
     ? new Date(state.tickers[0].window_end).toLocaleTimeString()
@@ -30,6 +32,7 @@ export default function App() {
         extractionBacklog={state.extractionBacklog}
         lastLlmCall={state.lastLlmCall}
         onOpenDB={() => setShowDB(true)}
+        onOpenPortfolio={() => setShowPortfolio(true)}
       />
 
       {/* Main grid: 3 columns × 2 rows */}
@@ -85,6 +88,7 @@ export default function App() {
         <SignalFiredToast signal={state.lastFiredSignal} />
       )}
       {showDB && <DBBrowser onClose={() => setShowDB(false)} />}
+      {showPortfolio && <PaperPortfolio onClose={() => setShowPortfolio(false)} />}
     </div>
   )
 }
