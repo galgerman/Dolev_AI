@@ -1,11 +1,32 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { api } from '../api'
-import type { CollectionProgress, GraphEdge, GraphNode, GraphSnapshot, Signal, TickerScore, WsEvent, XAuthStatus } from '../types'
+import type {
+  CollectionProgress,
+  Extraction,
+  GraphEdge,
+  GraphNode,
+  GraphSnapshot,
+  LLMStatus,
+  Signal,
+  ThemeScore,
+  TickerScore,
+  WsEvent,
+  XAuthStatus,
+} from '../types'
 import { useEventStream } from './useEventStream'
 
 const SCORE_HISTORY_MAX = 120  // keep ~2 hours of 1-min ticks per ticker
 
 interface ScorePoint { t: number; score: number }
+
+export interface LLMCall {
+  ts: number
+  tweet_id: string
+  latency_ms: number
+  is_finance: boolean
+  tickers_n: number
+  themes_n: number
+}
 
 export interface LiveState {
   tickers: TickerScore[]
@@ -19,6 +40,12 @@ export interface LiveState {
   threshold: number
   xAuth: XAuthStatus
   collection: CollectionProgress
+  themes: ThemeScore[]
+  extractions: Extraction[]
+  llmStatus: LLMStatus | null
+  extractionBacklog: { depth: number; capacity: number; dropped_total: number }
+  lastLlmCall: LLMCall | null
+  llmCallHistory: LLMCall[]
 }
 
 const INITIAL: LiveState = {
@@ -41,6 +68,12 @@ const INITIAL: LiveState = {
     tickers_found: 0,
     last_handle: null,
   },
+  themes: [],
+  extractions: [],
+  llmStatus: null,
+  extractionBacklog: { depth: 0, capacity: 0, dropped_total: 0 },
+  lastLlmCall: null,
+  llmCallHistory: [],
 }
 
 function upsertNode(nodes: GraphNode[], node: GraphNode) {
@@ -78,7 +111,7 @@ export function useLiveTickers() {
   const stateRef = useRef(state)
   stateRef.current = state
 
-  // Fetch initial threshold and X auth status
+  // Fetch initial threshold, X auth status, and LLM status
   useEffect(() => {
     api.health().then(h => {
       setState(s => ({ ...s, threshold: h.threshold }))
@@ -86,6 +119,19 @@ export function useLiveTickers() {
     api.xAuthStatus().then(status => {
       setState(s => ({ ...s, xAuth: status }))
     }).catch(() => {})
+
+    let cancelled = false
+    async function refreshLLM() {
+      try {
+        const s = await api.llmStatus()
+        if (!cancelled) setState(prev => ({ ...prev, llmStatus: s }))
+      } catch {
+        if (!cancelled) setState(prev => ({ ...prev, llmStatus: null }))
+      }
+    }
+    refreshLLM()
+    const iv = window.setInterval(refreshLLM, 7000)
+    return () => { cancelled = true; window.clearInterval(iv) }
   }, [])
 
   const handleEvent = useCallback((event: WsEvent) => {
@@ -104,6 +150,73 @@ export function useLiveTickers() {
             graphNodes: event.graph.nodes,
             graphEdges: event.graph.edges,
             scoreHistory: history,
+            themes: event.top_themes ?? [],
+            extractions: event.recent_extractions ?? [],
+          }
+        }
+
+        case 'post.extracted': {
+          const newExtraction: Extraction = {
+            id: 0,
+            tweet_id: event.tweet_id,
+            author: event.author,
+            text: event.text,
+            url: event.url,
+            is_finance: event.is_finance,
+            overall_sentiment: event.overall_sentiment as 'positive' | 'negative' | 'neutral',
+            summary: event.summary,
+            tickers: event.tickers,
+            themes: event.themes,
+            model: event.model,
+            latency_ms: event.latency_ms,
+            created_at: event.created_at,
+          }
+          // Dedup by tweet_id, keep most recent first
+          const filtered = prev.extractions.filter(e => e.tweet_id !== event.tweet_id)
+          return { ...prev, extractions: [newExtraction, ...filtered].slice(0, 200) }
+        }
+
+        case 'theme.score_updated': {
+          const updated = prev.themes.map(t =>
+            t.theme === event.theme
+              ? { ...t, score: event.score, voices: event.voices, tweet_count: event.tweet_count,
+                  threshold_progress: prev.threshold ? Math.abs(event.score) / prev.threshold : 0 }
+              : t
+          )
+          if (!updated.find(t => t.theme === event.theme)) {
+            updated.push({
+              theme: event.theme, score: event.score, voices: event.voices,
+              tweet_count: event.tweet_count,
+              threshold_progress: prev.threshold ? Math.abs(event.score) / prev.threshold : 0,
+              cascade_targets: [],
+            })
+          }
+          const sorted = [...updated].sort((a, b) => Math.abs(b.score) - Math.abs(a.score)).slice(0, 30)
+          return { ...prev, themes: sorted }
+        }
+
+        case 'extraction.backlog':
+          return {
+            ...prev,
+            extractionBacklog: {
+              depth: event.depth, capacity: event.capacity,
+              dropped_total: event.dropped_total,
+            },
+          }
+
+        case 'llm.call': {
+          const call: LLMCall = {
+            ts: event.ts,
+            tweet_id: event.tweet_id,
+            latency_ms: event.latency_ms,
+            is_finance: event.is_finance,
+            tickers_n: event.tickers_n,
+            themes_n: event.themes_n,
+          }
+          return {
+            ...prev,
+            lastLlmCall: call,
+            llmCallHistory: [call, ...prev.llmCallHistory].slice(0, 100),
           }
         }
 
@@ -246,50 +359,55 @@ export function useLiveTickers() {
         }
 
         case 'graph.edge_added': {
-          const edgeId = `acct:${event.author}→ticker:${event.ticker}`
-          const exists = prev.graphEdges.find(
-            e => e.source === `acct:${event.author}` && e.target === `ticker:${event.ticker}`
-          )
-          const accountNode: GraphNode = {
-            id: `acct:${event.author}`,
-            type: 'account',
-            label: `@${event.author}`,
-            size: Math.min(1, Math.max(0.3, event.weight)),
-            sentiment: 'neutral',
-            tier: 3,
-          }
-          const tickerNode: GraphNode = {
-            id: `ticker:${event.ticker}`,
-            type: 'ticker',
-            label: `$${event.ticker}`,
-            size: 0.25,
-            sentiment: event.sentiment,
-            tier: 0,
-          }
-          let graphNodes = upsertNode(prev.graphNodes, accountNode)
-          graphNodes = upsertNode(graphNodes, tickerNode)
+          // Prefer new from_id/to_id format; fall back to legacy author/ticker
+          const source = event.from_id ?? (event.author ? `acct:${event.author}` : null)
+          const target = event.to_id ?? (event.ticker ? `ticker:${event.ticker}` : null)
+          if (!source || !target) return prev
 
+          const exists = prev.graphEdges.find(e => e.source === source && e.target === target)
+          let graphNodes = prev.graphNodes
+          if (source.startsWith('acct:')) {
+            graphNodes = upsertNode(graphNodes, {
+              id: source, type: 'account', label: '@' + source.slice(5),
+              size: 0.5, sentiment: 'neutral', tier: 3,
+            })
+          } else if (source.startsWith('theme:')) {
+            graphNodes = upsertNode(graphNodes, {
+              id: source, type: 'theme', label: source.slice(6),
+              size: 0.3, sentiment: event.sentiment, tier: 0,
+            })
+          }
+          if (target.startsWith('ticker:')) {
+            graphNodes = upsertNode(graphNodes, {
+              id: target, type: 'ticker', label: '$' + target.slice(7),
+              size: 0.25, sentiment: event.sentiment, tier: 0,
+            })
+          } else if (target.startsWith('theme:')) {
+            graphNodes = upsertNode(graphNodes, {
+              id: target, type: 'theme', label: target.slice(6),
+              size: 0.3, sentiment: event.sentiment, tier: 0,
+            })
+          }
+
+          const edgeBase: GraphEdge = {
+            source, target,
+            weight: event.weight,
+            sentiment: event.sentiment,
+            edge_type: (event.edge_type as GraphEdge['edge_type']) ?? 'acct_ticker',
+            tweet_id: event.tweet_id ?? null,
+          }
           if (exists) {
             return {
               ...prev,
               graphNodes,
               graphEdges: prev.graphEdges.map(e =>
-                e.source === `acct:${event.author}` && e.target === `ticker:${event.ticker}`
-                  ? { ...e, weight: e.weight + event.weight }
+                e.source === source && e.target === target
+                  ? { ...e, weight: e.weight + event.weight, sentiment: event.sentiment }
                   : e
               ),
             }
           }
-          return {
-            ...prev,
-            graphNodes,
-            graphEdges: [...prev.graphEdges, {
-              source: `acct:${event.author}`,
-              target: `ticker:${event.ticker}`,
-              weight: event.weight,
-              sentiment: event.sentiment,
-            }],
-          }
+          return { ...prev, graphNodes, graphEdges: [...prev.graphEdges, edgeBase] }
         }
 
         case 'auth.x.status_changed':

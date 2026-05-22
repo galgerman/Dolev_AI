@@ -1,0 +1,68 @@
+# Local LLM model catalogue.
+# Edit this file when you change hardware or want to try new models.
+# Then run: py -3.12 scripts/probe_hardware.py
+#
+# probe_hardware.py walks `candidates` top-to-bottom and picks the first one
+# whose `min_vram_gb` fits available VRAM (or `cpu_ok: true` falls through).
+# Result is written to config/active_model.yaml.
+
+candidates:
+  - name: qwen2.5:32b
+    provider: openai_compat
+    endpoint: http://localhost:11434/v1
+    min_vram_gb: 22
+    notes: "Best — RTX 4090 / A6000 class"
+
+  - name: qwen2.5:14b
+    provider: openai_compat
+    endpoint: http://localhost:11434/v1
+    min_vram_gb: 11
+    notes: "RTX 4080 / 3090 / 4070 Ti Super"
+
+  - name: gemma2:9b
+    provider: openai_compat
+    endpoint: http://localhost:11434/v1
+    min_vram_gb: 7
+    notes: "Alternative to qwen 7B"
+
+  - name: qwen2.5:7b
+    provider: openai_compat
+    endpoint: http://localhost:11434/v1
+    min_vram_gb: 6
+    notes: "RTX 4060 8GB / 32GB RAM"
+
+  - name: qwen2.5:3b
+    provider: openai_compat
+    endpoint: http://localhost:11434/v1
+    min_vram_gb: 3
+    cpu_ok: true
+    notes: "Last GPU-friendly option / decent on CPU"
+
+  - name: llama3.2:3b
+    provider: openai_compat
+    endpoint: http://localhost:11434/v1
+    min_vram_gb: 3
+    cpu_ok: true
+    notes: "CPU-friendly fallback"
+
+  - name: llama3.2:1b
+    provider: openai_compat
+    endpoint: http://localhost:11434/v1
+    min_vram_gb: 0
+    cpu_ok: true
+    notes: "Tiny — weak but fast on any CPU"
+
+# Manual override — set name here to pin a specific model regardless of probe.
+# Leave empty to let probe pick.
+pin: ""
+
+defaults:
+  batch_size: 8
+  max_concurrent: 2
+  timeout_s: 60
+  max_queue: 1000
+
+# Alternative endpoints to try if the default Ollama port isn't running.
+alt_endpoints:
+  - http://localhost:1234/v1   # LM Studio
+  - http://localhost:11434/v1  # Ollama

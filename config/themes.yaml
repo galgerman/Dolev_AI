@@ -1,0 +1,205 @@
+# Theme taxonomy for LLM extraction.
+# The LLM MUST pick only from these theme keys. Off-taxonomy themes are rejected.
+#
+# Each theme:
+#   description: shown in the prompt to anchor meaning
+#   tickers: { TICKER: weight } where weight ∈ [-1.0, 1.0]
+#       positive weight = bullish theme boosts this ticker
+#       negative weight = bullish theme HURTS this ticker (inverse exposure)
+#   tickers: {} = event flag; no graph node, only attaches to tickers
+#                 mentioned in the same post (e.g. earnings_beat)
+#
+# Cascade: theme_score × ticker_weight × 0.5 = boost added to that ticker
+#
+# CASCADE_FACTOR is global (in code, 0.5).
+
+# ── AI / Semiconductors ────────────────────────────────────────────────
+ai_infrastructure:
+  description: "AI chips, data centers, model training compute, GPU demand"
+  tickers: { NVDA: 1.0, AMD: 0.8, TSM: 0.7, AVGO: 0.6, ASML: 0.6, ARM: 0.5, MU: 0.5, SMCI: 0.6 }
+
+ai_software:
+  description: "Enterprise AI apps, LLM products, AI-driven SaaS"
+  tickers: { MSFT: 0.9, GOOGL: 0.9, META: 0.7, ORCL: 0.5, PLTR: 0.6, CRM: 0.5, NOW: 0.4 }
+
+semiconductor_cycle:
+  description: "Chip inventory, end-demand cycle, foundry utilization"
+  tickers: { NVDA: 0.7, AMD: 0.8, INTC: 0.8, TSM: 0.9, MU: 0.9, AMAT: 0.7, LRCX: 0.7, KLAC: 0.6 }
+
+# ── EV / Auto ──────────────────────────────────────────────────────────
+ev_demand:
+  description: "EV sales, charging adoption, EV-specific supply chain"
+  tickers: { TSLA: 1.0, RIVN: 0.7, F: 0.4, GM: 0.4, LCID: 0.5, NIO: 0.5, BYDDY: 0.5 }
+
+auto_traditional:
+  description: "Legacy auto OEMs, ICE volumes, dealer inventory"
+  tickers: { F: 0.9, GM: 0.9, STLA: 0.7, TM: 0.6, HMC: 0.6 }
+
+ev_charging:
+  description: "EV charging infrastructure"
+  tickers: { CHPT: 0.8, BLNK: 0.7, EVGO: 0.7, TSLA: 0.3 }
+
+# ── Banking / Finance ──────────────────────────────────────────────────
+big_banks:
+  description: "Money-center banks, investment banking"
+  tickers: { JPM: 0.9, BAC: 0.9, WFC: 0.8, C: 0.7, GS: 0.7, MS: 0.7 }
+
+regional_banks_stress:
+  description: "Regional bank deposit flight, CRE exposure, balance-sheet stress"
+  tickers: { KRE: 1.0, USB: 0.7, RF: 0.7, ZION: 0.7, CFG: 0.6, WAL: 0.7 }
+
+insurance:
+  description: "P&C, life insurance, reinsurance"
+  tickers: { BRK.B: 0.5, PGR: 0.8, ALL: 0.7, TRV: 0.7, MET: 0.7 }
+
+fintech_disruption:
+  description: "Payments, crypto-adjacent fintech, neobanks"
+  tickers: { SQ: 0.9, PYPL: 0.8, COIN: 0.8, HOOD: 0.7, SOFI: 0.7, V: 0.4, MA: 0.4 }
+
+# ── Macro ──────────────────────────────────────────────────────────────
+rate_cuts:
+  description: "Fed easing, lower rates expected, dovish Fed signals"
+  tickers: { TLT: 0.9, SPY: 0.4, QQQ: 0.5, XLU: 0.7, IWM: 0.7, KRE: 0.6, XLRE: 0.7 }
+
+rate_hikes:
+  description: "Fed tightening, hawkish signals, higher-for-longer"
+  tickers: { TLT: -0.9, KRE: -0.7, XLU: -0.5, XLRE: -0.7, QQQ: -0.3, IWM: -0.5 }
+
+inflation_hot:
+  description: "Hot CPI/PCE, sticky inflation, wage pressure"
+  tickers: { TLT: -0.7, GLD: 0.5, XLE: 0.5, USO: 0.5 }
+
+inflation_cool:
+  description: "Cooling inflation, disinflation data"
+  tickers: { TLT: 0.7, QQQ: 0.5, IWM: 0.6 }
+
+recession_fear:
+  description: "Recession warnings, hard landing risk"
+  tickers: { TLT: 0.6, GLD: 0.5, XLP: 0.6, XLU: 0.5, SPY: -0.5, IWM: -0.7, KRE: -0.7 }
+
+soft_landing:
+  description: "Soft-landing narrative, economy resilient + inflation cooling"
+  tickers: { SPY: 0.7, IWM: 0.7, QQQ: 0.5, KRE: 0.5 }
+
+dollar_strength:
+  description: "USD strength, DXY rally"
+  tickers: { GLD: -0.5, EEM: -0.6, XLE: -0.3 }
+
+risk_on:
+  description: "Broad risk appetite, growth/momentum names bid"
+  tickers: { SPY: 0.7, QQQ: 0.8, IWM: 0.7, ARKK: 0.8, BTC: 0.6 }
+
+risk_off:
+  description: "Flight to safety"
+  tickers: { TLT: 0.7, GLD: 0.6, VIX: 0.8, XLP: 0.5, SPY: -0.5 }
+
+# ── Energy / Commodities ───────────────────────────────────────────────
+energy_supply:
+  description: "Oil supply, OPEC, geopolitical disruption to production"
+  tickers: { XOM: 0.9, CVX: 0.9, OXY: 0.8, COP: 0.8, USO: 0.9, XLE: 0.9 }
+
+oil_demand:
+  description: "Oil demand outlook, China demand, refining"
+  tickers: { XOM: 0.7, CVX: 0.7, MPC: 0.8, PSX: 0.8, VLO: 0.8, USO: 0.7 }
+
+gold_safe_haven:
+  description: "Gold rally, safe-haven flows"
+  tickers: { GLD: 1.0, GDX: 0.9, NEM: 0.8 }
+
+crypto_bullish:
+  description: "Crypto rally, BTC/ETH up, crypto-equity correlation"
+  tickers: { COIN: 0.9, MSTR: 0.9, MARA: 0.9, RIOT: 0.9, IBIT: 1.0, HOOD: 0.5 }
+
+crypto_bearish:
+  description: "Crypto sell-off, regulatory crackdown"
+  tickers: { COIN: -0.9, MSTR: -0.9, MARA: -0.9, RIOT: -0.9, IBIT: -1.0 }
+
+# ── Healthcare / Biotech ───────────────────────────────────────────────
+biotech_breakthrough:
+  description: "Positive trial data, FDA momentum, M&A in biotech"
+  tickers: { XBI: 0.9, REGN: 0.6, VRTX: 0.6, MRNA: 0.6, BIIB: 0.5 }
+
+weight_loss_drugs:
+  description: "GLP-1, Ozempic/Wegovy/Mounjaro/Zepbound, obesity TAM"
+  tickers: { LLY: 1.0, NVO: 1.0, PFE: 0.3, AMGN: 0.3 }
+
+pharma_pricing:
+  description: "Drug pricing pressure, IRA negotiations, PBM scrutiny"
+  tickers: { PFE: -0.6, JNJ: -0.5, MRK: -0.5, ABBV: -0.5, CVS: -0.4, UNH: -0.5 }
+
+# ── Defense / Geopolitics ──────────────────────────────────────────────
+defense_spending:
+  description: "Defense budgets, US/EU defense ramp, missile/drone demand"
+  tickers: { LMT: 0.9, RTX: 0.9, NOC: 0.9, GD: 0.8, BA: 0.4, HII: 0.7 }
+
+china_consumer:
+  description: "Chinese consumer recovery, China reopening"
+  tickers: { BABA: 0.9, PDD: 0.9, JD: 0.9, NIO: 0.6, EEM: 0.5 }
+
+china_tension:
+  description: "US-China tension, export controls, Taiwan risk"
+  tickers: { TSM: -0.7, NVDA: -0.4, AAPL: -0.5, AMD: -0.4, BABA: -0.6, FXI: -0.7 }
+
+# ── Consumer / Retail ──────────────────────────────────────────────────
+travel_demand:
+  description: "Airlines, hotels, leisure travel, cruise"
+  tickers: { DAL: 0.9, UAL: 0.9, AAL: 0.7, MAR: 0.8, HLT: 0.8, ABNB: 0.7, BKNG: 0.7, CCL: 0.6 }
+
+housing_demand:
+  description: "Homebuilders, mortgage demand, existing-home sales"
+  tickers: { LEN: 0.9, DHI: 0.9, PHM: 0.8, NVR: 0.7, HD: 0.6, LOW: 0.6, Z: 0.7 }
+
+retail_consumer_strong:
+  description: "Strong consumer spending, off-price/value resilient"
+  tickers: { WMT: 0.8, COST: 0.8, AMZN: 0.6, TGT: 0.6, TJX: 0.7, BJ: 0.6 }
+
+retail_consumer_weak:
+  description: "Consumer rolling over, low-end stress, discretionary cuts"
+  tickers: { TGT: -0.7, KSS: -0.8, M: -0.7, ULTA: -0.6, DG: -0.6, DLTR: -0.6 }
+
+streaming_wars:
+  description: "Streaming subs, content spend, ad-tier traction"
+  tickers: { NFLX: 0.9, DIS: 0.8, WBD: 0.7, PARA: 0.6, ROKU: 0.5 }
+
+# ── Tech sub-themes ────────────────────────────────────────────────────
+cloud_growth:
+  description: "Hyperscaler cloud revenue, capex tied to cloud"
+  tickers: { AMZN: 0.8, MSFT: 0.9, GOOGL: 0.8, ORCL: 0.6, SNOW: 0.7, MDB: 0.5 }
+
+cybersecurity:
+  description: "Cyber demand, breach news, security spending"
+  tickers: { CRWD: 0.9, PANW: 0.9, ZS: 0.8, S: 0.8, FTNT: 0.8, OKTA: 0.6 }
+
+solar_renewable:
+  description: "Solar demand, renewable policy, energy transition"
+  tickers: { ENPH: 0.9, FSLR: 0.9, SEDG: 0.8, RUN: 0.8, ICLN: 0.9 }
+
+nuclear_revival:
+  description: "Nuclear power, SMRs, uranium"
+  tickers: { CCJ: 1.0, NXE: 0.8, SMR: 0.9, UEC: 0.8, URA: 0.9 }
+
+# ── Event-flag themes (no own graph node; attach to co-mentioned tickers)
+earnings_beat: { description: "Company beat earnings expectations", tickers: {} }
+earnings_miss: { description: "Company missed earnings expectations", tickers: {} }
+guidance_raise: { description: "Company raised forward guidance", tickers: {} }
+guidance_cut: { description: "Company cut forward guidance", tickers: {} }
+fda_approval: { description: "FDA approved a drug/device", tickers: {} }
+fda_rejection: { description: "FDA rejection or CRL", tickers: {} }
+merger_announcement: { description: "M&A announced", tickers: {} }
+spinoff: { description: "Corporate spinoff/separation announced", tickers: {} }
+buyback_announcement: { description: "Significant share repurchase announced", tickers: {} }
+dividend_cut: { description: "Dividend reduction or suspension", tickers: {} }
+dividend_raise: { description: "Dividend increase announced", tickers: {} }
+analyst_upgrade: { description: "Sell-side upgrade or PT raise", tickers: {} }
+analyst_downgrade: { description: "Sell-side downgrade or PT cut", tickers: {} }
+insider_buying: { description: "Notable insider purchases", tickers: {} }
+insider_selling: { description: "Notable insider sales" , tickers: {} }
+short_squeeze: { description: "Short squeeze dynamics, high-borrow names", tickers: {} }
+unusual_options_flow: { description: "Unusual options activity flagged", tickers: {} }
+
+# ── Macro events (calendar-driven) ─────────────────────────────────────
+fed_meeting: { description: "FOMC meeting / Powell presser context", tickers: {} }
+cpi_release: { description: "CPI print", tickers: {} }
+jobs_report: { description: "NFP / jobs data release", tickers: {} }
+gdp_release: { description: "GDP print", tickers: {} }
+fed_minutes: { description: "FOMC minutes release", tickers: {} }

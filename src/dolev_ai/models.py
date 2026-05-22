@@ -34,6 +34,18 @@ class TickerScore:
     window_end: datetime
     top_tweet_urls: list[str] = field(default_factory=list)
     threshold_progress: float = 0.0  # abs(score)/threshold ∈ [0, ∞); ≥1.0 means threshold crossed
+    direct_score: float = 0.0        # score from explicit/inferred ticker mentions
+    cascade_score: float = 0.0       # score cascaded from theme activations
+
+
+@dataclass
+class ThemeScore:
+    theme: str
+    score: float                    # signed
+    voices: int                     # unique credible authors
+    tweet_count: int
+    window_start: datetime
+    window_end: datetime
 
 
 @dataclass

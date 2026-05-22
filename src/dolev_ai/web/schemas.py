@@ -16,6 +16,8 @@ class TickerScoreOut(BaseModel):
     window_end: datetime
     top_tweet_urls: list[str]
     threshold_progress: float
+    direct_score: float = 0.0
+    cascade_score: float = 0.0
 
 
 class SignalOut(BaseModel):
@@ -36,18 +38,21 @@ class AccountOut(BaseModel):
 
 class GraphNodeOut(BaseModel):
     id: str
-    type: Literal["account", "ticker"]
+    type: Literal["account", "ticker", "theme"]
     label: str
-    size: float        # credibility for accounts, abs(score) for tickers
-    sentiment: str     # "positive" | "negative" | "neutral" (for tickers)
-    tier: int          # 0 for tickers
+    size: float        # credibility for accounts, abs(score) for tickers/themes
+    sentiment: str     # "positive" | "negative" | "neutral"
+    tier: int          # 0 for tickers/themes
 
 
 class GraphEdgeOut(BaseModel):
-    source: str   # account handle
-    target: str   # ticker symbol
+    source: str
+    target: str
     weight: float
     sentiment: str
+    edge_type: str = "acct_ticker"
+    tweet_id: str | None = None
+    id: int | None = None
 
 
 class GraphSnapshotOut(BaseModel):
@@ -94,3 +99,91 @@ class SnapshotEvent(BaseModel):
     top_tickers: list[TickerScoreOut]
     recent_signals: list[SignalOut]
     graph: GraphSnapshotOut
+
+
+# ── Extraction / theme / LLM schemas ─────────────────────────────────────
+
+class TickerMentionOut(BaseModel):
+    ticker: str
+    sentiment: str
+    confidence: float
+    explicit: bool = False
+
+
+class ThemeMentionOut(BaseModel):
+    theme: str
+    sentiment: str
+    confidence: float
+
+
+class ExtractionOut(BaseModel):
+    id: int
+    tweet_id: str
+    author: str
+    text: str
+    url: str
+    is_finance: bool
+    overall_sentiment: str
+    summary: str
+    tickers: list[TickerMentionOut]
+    themes: list[ThemeMentionOut]
+    model: str
+    latency_ms: int
+    created_at: datetime
+
+
+class ThemeScoreOut(BaseModel):
+    theme: str
+    score: float
+    voices: int
+    tweet_count: int
+    threshold_progress: float
+    cascade_targets: list[str] = []   # tickers this theme cascades to
+
+
+class EdgeDetailOut(BaseModel):
+    id: int
+    from_id: str
+    to_id: str
+    edge_type: str
+    weight: float
+    sentiment: str
+    tweet_id: str | None
+    created_at: datetime
+    # If tweet_id present, full tweet
+    tweet: DrilldownTweetOut | None = None
+
+
+class LLMStatusOut(BaseModel):
+    provider: str
+    model: str
+    endpoint: str
+    healthy: bool
+    backlog: int
+    capacity: int
+    running: bool
+    calls_total: int = 0
+    calls_finance: int = 0
+    calls_errors: int = 0
+    avg_latency_ms: int = 0
+    last_call_at: float | None = None
+    dropped_total: int = 0
+
+
+class DBStatsOut(BaseModel):
+    tweets: int
+    extractions: int
+    extractions_finance: int
+    tickers: int
+    themes: int
+    edges: int
+    signals: int
+    last_tweet_at: datetime | None = None
+    last_extraction_at: datetime | None = None
+
+
+class DBTableRowOut(BaseModel):
+    """Generic row view for the DB browser."""
+    id: int | str
+    fields: dict
+

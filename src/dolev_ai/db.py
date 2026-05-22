@@ -6,9 +6,12 @@ import pathlib
 from datetime import datetime
 
 from sqlalchemy import (
+    Boolean,
     Column,
     DateTime,
     Float,
+    ForeignKey,
+    Index,
     Integer,
     String,
     Text,
@@ -71,6 +74,67 @@ class AlertLogRow(Base):
     conviction = Column(Float, nullable=False)
     sent_at = Column(DateTime, default=datetime.utcnow)
     channel = Column(String, default="telegram")
+
+
+# ── LLM extraction tables ────────────────────────────────────────────────
+
+class ExtractionRow(Base):
+    __tablename__ = "extractions"
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    tweet_id = Column(String, ForeignKey("tweets.id"), nullable=False, index=True)
+    model = Column(String, nullable=False)
+    is_finance = Column(Boolean, default=False)
+    overall_sentiment = Column(String, default="neutral")
+    summary = Column(Text, default="")
+    raw_json = Column(Text, default="")
+    latency_ms = Column(Integer, default=0)
+    created_at = Column(DateTime, default=datetime.utcnow, index=True)
+
+
+class ExtractedTickerRow(Base):
+    __tablename__ = "extracted_tickers"
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    extraction_id = Column(Integer, ForeignKey("extractions.id"), nullable=False, index=True)
+    ticker = Column(String, nullable=False, index=True)
+    sentiment = Column(String, nullable=False)
+    confidence = Column(Float, nullable=False)
+    explicit = Column(Boolean, default=False)
+
+
+class ExtractedThemeRow(Base):
+    __tablename__ = "extracted_themes"
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    extraction_id = Column(Integer, ForeignKey("extractions.id"), nullable=False, index=True)
+    theme = Column(String, nullable=False, index=True)
+    sentiment = Column(String, nullable=False)
+    confidence = Column(Float, nullable=False)
+
+
+class GraphEdgeRow(Base):
+    __tablename__ = "graph_edges"
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    from_id = Column(String, nullable=False, index=True)   # "acct:handle" or "theme:key"
+    to_id = Column(String, nullable=False, index=True)     # "ticker:NVDA" or "theme:key"
+    edge_type = Column(String, nullable=False)             # acct_ticker | acct_theme | theme_ticker
+    weight = Column(Float, nullable=False)
+    sentiment = Column(String, default="neutral")
+    tweet_id = Column(String, nullable=True, index=True)   # source post (null for theme_ticker)
+    created_at = Column(DateTime, default=datetime.utcnow, index=True)
+
+
+class ThemeScoreRow(Base):
+    __tablename__ = "theme_scores"
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    theme = Column(String, nullable=False, index=True)
+    score = Column(Float, nullable=False)
+    voices = Column(Integer, default=0)
+    tweet_count = Column(Integer, default=0)
+    window_start = Column(DateTime, nullable=False)
+    window_end = Column(DateTime, nullable=False)
+
+
+Index("ix_extractions_tweet_created", ExtractionRow.tweet_id, ExtractionRow.created_at)
+Index("ix_graph_edges_recent", GraphEdgeRow.created_at, GraphEdgeRow.edge_type)
 
 
 def init_db(db_path: pathlib.Path = DB_PATH) -> sessionmaker:
@@ -150,3 +214,143 @@ def log_alert(session: Session, sig: Signal, channel: str = "telegram") -> None:
         channel=channel,
     ))
     session.commit()
+
+
+# ── Extraction persistence ──────────────────────────────────────────────
+
+def save_extraction(session: Session, ex) -> int:
+    """Persist an Extraction. Returns the extraction row id."""
+    row = ExtractionRow(
+        tweet_id=ex.post_id,
+        model=ex.model,
+        is_finance=ex.is_finance,
+        overall_sentiment=ex.overall_sentiment,
+        summary=ex.summary,
+        raw_json=ex.raw_json,
+        latency_ms=ex.latency_ms,
+    )
+    session.add(row)
+    session.flush()  # populate row.id
+    for tm in ex.tickers:
+        session.add(ExtractedTickerRow(
+            extraction_id=row.id, ticker=tm.ticker,
+            sentiment=tm.sentiment, confidence=tm.confidence,
+            explicit=tm.explicit,
+        ))
+    for th in ex.themes:
+        session.add(ExtractedThemeRow(
+            extraction_id=row.id, theme=th.theme,
+            sentiment=th.sentiment, confidence=th.confidence,
+        ))
+    session.commit()
+    return row.id
+
+
+def save_graph_edge(
+    session: Session, from_id: str, to_id: str, edge_type: str,
+    weight: float, sentiment: str = "neutral", tweet_id: str | None = None,
+) -> None:
+    session.add(GraphEdgeRow(
+        from_id=from_id, to_id=to_id, edge_type=edge_type,
+        weight=weight, sentiment=sentiment, tweet_id=tweet_id,
+    ))
+    session.commit()
+
+
+def save_theme_score(
+    session: Session, theme: str, score: float, voices: int,
+    tweet_count: int, window_start: datetime, window_end: datetime,
+) -> None:
+    session.add(ThemeScoreRow(
+        theme=theme, score=score, voices=voices, tweet_count=tweet_count,
+        window_start=window_start, window_end=window_end,
+    ))
+    session.commit()
+
+
+def prune_old_data(
+    session: Session,
+    tweets_keep_days: int = 30,
+    scores_keep_hours: int = 24,
+    edges_keep_hours: int = 24,
+) -> dict:
+    """Trim the DB to bounded sizes. Returns counts of rows deleted per table."""
+    from datetime import timedelta
+    now = datetime.utcnow()
+    tweets_cutoff = now - timedelta(days=tweets_keep_days)
+    scores_cutoff = now - timedelta(hours=scores_keep_hours)
+    edges_cutoff = now - timedelta(hours=edges_keep_hours)
+
+    counts: dict[str, int] = {}
+
+    # Time-series tables (regenerated every cycle)
+    counts["ticker_scores"] = session.query(TickerScoreRow).filter(
+        TickerScoreRow.window_end < scores_cutoff
+    ).delete(synchronize_session=False)
+
+    counts["theme_scores"] = session.query(ThemeScoreRow).filter(
+        ThemeScoreRow.window_end < scores_cutoff
+    ).delete(synchronize_session=False)
+
+    counts["graph_edges"] = session.query(GraphEdgeRow).filter(
+        GraphEdgeRow.created_at < edges_cutoff
+    ).delete(synchronize_session=False)
+
+    # Find old tweets first so we can cascade-delete their extractions
+    old_tweet_ids = [
+        t.id for t in session.query(TweetRow.id)
+        .filter(TweetRow.created_at < tweets_cutoff).all()
+    ]
+    if old_tweet_ids:
+        # Delete dependent extracted_tickers/themes first (no ON DELETE CASCADE in SQLite by default)
+        old_ex_ids = [
+            r.id for r in session.query(ExtractionRow.id)
+            .filter(ExtractionRow.tweet_id.in_(old_tweet_ids)).all()
+        ]
+        if old_ex_ids:
+            session.query(ExtractedTickerRow).filter(
+                ExtractedTickerRow.extraction_id.in_(old_ex_ids)
+            ).delete(synchronize_session=False)
+            session.query(ExtractedThemeRow).filter(
+                ExtractedThemeRow.extraction_id.in_(old_ex_ids)
+            ).delete(synchronize_session=False)
+        counts["extractions"] = session.query(ExtractionRow).filter(
+            ExtractionRow.tweet_id.in_(old_tweet_ids)
+        ).delete(synchronize_session=False)
+        counts["tweets"] = session.query(TweetRow).filter(
+            TweetRow.id.in_(old_tweet_ids)
+        ).delete(synchronize_session=False)
+    else:
+        counts["extractions"] = 0
+        counts["tweets"] = 0
+
+    session.commit()
+    return counts
+
+
+def vacuum_db(session: Session) -> None:
+    """Reclaim space after big deletes. SQLite-only."""
+    session.execute(text("VACUUM"))
+
+
+def load_extractions_since(session: Session, since: datetime) -> list:
+    """Load extractions joined with their tweets, since the given time."""
+    rows = (
+        session.query(ExtractionRow, TweetRow)
+        .join(TweetRow, ExtractionRow.tweet_id == TweetRow.id)
+        .filter(ExtractionRow.created_at >= since, ExtractionRow.is_finance == True)
+        .all()
+    )
+    out = []
+    for ex_row, tw_row in rows:
+        tickers = session.query(ExtractedTickerRow).filter(
+            ExtractedTickerRow.extraction_id == ex_row.id).all()
+        themes = session.query(ExtractedThemeRow).filter(
+            ExtractedThemeRow.extraction_id == ex_row.id).all()
+        out.append({
+            "extraction": ex_row,
+            "tweet": tw_row,
+            "tickers": tickers,
+            "themes": themes,
+        })
+    return out

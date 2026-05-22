@@ -47,21 +47,36 @@ def create_app(
 
     def _snapshot() -> dict:
         """Build the initial snapshot event sent to new WS connections."""
-        from dolev_ai.web.api import tickers_live, signals_recent, graph_snapshot
+        from dolev_ai.web.api import (
+            extractions_recent,
+            graph_snapshot,
+            signals_recent,
+            themes_active,
+            tickers_live,
+        )
         try:
             with session_factory() as db:
                 tickers = tickers_live(limit=20, db=db)
                 signals = signals_recent(limit=10, db=db)
                 graph = graph_snapshot(db=db)
+                themes = themes_active(limit=20, db=db)
+                extractions = extractions_recent(limit=30, db=db)
             return {
                 "type": "snapshot",
-                "top_tickers": [t.model_dump() for t in tickers],
-                "recent_signals": [s.model_dump() for s in signals],
-                "graph": graph.model_dump(),
+                "top_tickers": [t.model_dump(mode="json") for t in tickers],
+                "recent_signals": [s.model_dump(mode="json") for s in signals],
+                "graph": graph.model_dump(mode="json"),
+                "top_themes": [t.model_dump(mode="json") for t in themes],
+                "recent_extractions": [e.model_dump(mode="json") for e in extractions],
             }
         except Exception as e:
             logger.warning(f"Snapshot build failed: {e}")
-            return {"type": "snapshot", "top_tickers": [], "recent_signals": [], "graph": {"nodes": [], "edges": []}}
+            return {
+                "type": "snapshot",
+                "top_tickers": [], "recent_signals": [],
+                "graph": {"nodes": [], "edges": []},
+                "top_themes": [], "recent_extractions": [],
+            }
 
     configure_ws(event_bus=event_bus, snapshot_fn=_snapshot)
 

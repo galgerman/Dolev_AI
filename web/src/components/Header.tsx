@@ -1,7 +1,8 @@
 import { useEffect, useState } from 'react'
 import { api } from '../api'
 import type { ConnectionStatus } from '../hooks/useEventStream'
-import type { AgentStatus, CollectionProgress, XAuthStatus } from '../types'
+import type { AgentStatus, CollectionProgress, LLMStatus, XAuthStatus } from '../types'
+import { LLMStatusBadge } from './LLMStatusBadge'
 
 interface Props {
   wsStatus: ConnectionStatus
@@ -9,6 +10,10 @@ interface Props {
   lastEval?: string
   xAuth: XAuthStatus
   collection: CollectionProgress
+  llmStatus: LLMStatus | null
+  extractionBacklog: { depth: number; capacity: number; dropped_total: number }
+  lastLlmCall?: { ts: number; latency_ms: number; is_finance: boolean } | null
+  onOpenDB: () => void
 }
 
 const STATUS_COLORS: Record<ConnectionStatus, string> = {
@@ -25,7 +30,7 @@ const STATE_LABEL: Record<XAuthStatus['state'], string> = {
   error: 'Retry login',
 }
 
-export function Header({ wsStatus, threshold, lastEval, xAuth, collection }: Props) {
+export function Header({ wsStatus, threshold, lastEval, xAuth, collection, llmStatus, extractionBacklog, lastLlmCall, onOpenDB }: Props) {
   const [busy, setBusy] = useState(false)
   const [agentBusy, setAgentBusy] = useState(false)
   const [agentStatus, setAgentStatus] = useState<AgentStatus | null>(null)
@@ -92,6 +97,14 @@ export function Header({ wsStatus, threshold, lastEval, xAuth, collection }: Pro
       </div>
 
       <div className="flex items-center justify-end gap-3 text-xs text-gray-400 min-w-0">
+        <LLMStatusBadge status={llmStatus} backlog={extractionBacklog} lastCall={lastLlmCall} />
+        <button
+          onClick={onOpenDB}
+          className="px-2 py-0.5 rounded bg-gray-800 hover:bg-gray-700 text-gray-300 text-[11px]"
+          title="Browse the SQLite database"
+        >
+          ⛁ DB
+        </button>
         <span>threshold <span className="text-white font-semibold">{threshold.toFixed(1)}</span></span>
         {lastEval && <span>last eval <span className="text-gray-300">{lastEval}</span></span>}
         {collection.total > 0 && (

@@ -76,7 +76,7 @@ async def test_agent_start_stop_worker_is_idempotent(monkeypatch):
     assert status["mode"] == "dry-run"
     assert source.starts == 1
     assert len(schedulers) == 1
-    assert len(schedulers[0].jobs) == 2
+    assert len(schedulers[0].jobs) == 3   # collect + evaluate + prune
 
     assert await agent.stop_worker() is True
     assert await agent.stop_worker() is False
