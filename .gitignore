@@ -17,6 +17,8 @@ config/universe.csv
 
 # Playwright browser profile (contains login session — never commit)
 browser_profile/
+browser_profile_chrome/
+browser_profile*_backup*/
 
 # IDE
 .vscode/
@@ -25,3 +27,5 @@ browser_profile/
 # Misc
 *.log
 .DS_Store
+web/node_modules/.bin/
+web/node_modules/

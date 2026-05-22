@@ -1,4 +1,19 @@
-import type { Account, HealthInfo, TickerDrilldown, TickerScore, Signal, GraphSnapshot, XAuthStatus } from './types'
+import type {
+  Account,
+  AgentStatus,
+  DBPage,
+  DBStats,
+  EdgeDetail,
+  Extraction,
+  GraphSnapshot,
+  HealthInfo,
+  LLMStatus,
+  Signal,
+  ThemeScore,
+  TickerDrilldown,
+  TickerScore,
+  XAuthStatus,
+} from './types'
 
 const BASE = '/api'
 
@@ -21,6 +36,27 @@ export const api = {
   signalsRecent: (limit = 20) => get<Signal[]>(`/signals/recent?limit=${limit}`),
   graphSnapshot: () => get<GraphSnapshot>('/graph/snapshot'),
   accounts: () => get<Account[]>('/accounts'),
+  agentStatus: () => get<AgentStatus>('/agent/status'),
+  agentStart: () => post<AgentStatus & { started: boolean }>('/agent/start'),
+  agentStop: () => post<AgentStatus & { stopped: boolean }>('/agent/stop'),
   xAuthStatus: () => get<XAuthStatus>('/auth/x/status'),
   xAuthLogin: () => post<{ started: boolean; state: string }>('/auth/x/login'),
+  extractionsRecent: (limit = 50) => get<Extraction[]>(`/extractions/recent?limit=${limit}`),
+  themesActive: (limit = 20) => get<ThemeScore[]>(`/themes/active?limit=${limit}`),
+  themeDrilldown: (theme: string) => get<unknown>(`/themes/${theme}`),
+  edgeDetail: (id: number) => get<EdgeDetail>(`/edges/${id}`),
+  llmStatus: () => get<LLMStatus>('/llm/status'),
+  dbStats: () => get<DBStats>('/db/stats'),
+  dbTweets: (limit = 50, offset = 0, q = '') =>
+    get<DBPage>(`/db/tweets?limit=${limit}&offset=${offset}&q=${encodeURIComponent(q)}`),
+  dbExtractions: (limit = 50, offset = 0, financeOnly = false, q = '') =>
+    get<DBPage>(`/db/extractions?limit=${limit}&offset=${offset}&finance_only=${financeOnly}&q=${encodeURIComponent(q)}`),
+  dbTickerScores: (limit = 50, offset = 0) =>
+    get<DBPage>(`/db/ticker_scores?limit=${limit}&offset=${offset}`),
+  dbThemeScores: (limit = 50, offset = 0) =>
+    get<DBPage>(`/db/theme_scores?limit=${limit}&offset=${offset}`),
+  dbEdges: (limit = 50, offset = 0) =>
+    get<DBPage>(`/db/graph_edges?limit=${limit}&offset=${offset}`),
+  dbSignals: (limit = 50, offset = 0) =>
+    get<DBPage>(`/db/signals?limit=${limit}&offset=${offset}`),
 }

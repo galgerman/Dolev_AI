@@ -1,7 +1,15 @@
 {
   "permissions": {
     "allow": [
-      "PowerShell(if \\(-not \\(Test-Path \"C:\\\\CodeProjects\\\\dolev_ai\\\\.claude\\\\plans\"\\)\\) { New-Item -ItemType Directory -Force -Path \"C:\\\\CodeProjects\\\\dolev_ai\\\\.claude\\\\plans\" | Out-Null }; Copy-Item -Path \"$env:USERPROFILE\\\\.claude\\\\plans\\\\i-want-to-design-parsed-sunbeam.md\" -Destination \"C:\\\\CodeProjects\\\\dolev_ai\\\\.claude\\\\plans\\\\i-want-to-design-parsed-sunbeam.md\" -Force; Test-Path \"C:\\\\CodeProjects\\\\dolev_ai\\\\.claude\\\\plans\\\\i-want-to-design-parsed-sunbeam.md\")"
+      "PowerShell(if \\(-not \\(Test-Path \"C:\\\\CodeProjects\\\\dolev_ai\\\\.claude\\\\plans\"\\)\\) { New-Item -ItemType Directory -Force -Path \"C:\\\\CodeProjects\\\\dolev_ai\\\\.claude\\\\plans\" | Out-Null }; Copy-Item -Path \"$env:USERPROFILE\\\\.claude\\\\plans\\\\i-want-to-design-parsed-sunbeam.md\" -Destination \"C:\\\\CodeProjects\\\\dolev_ai\\\\.claude\\\\plans\\\\i-want-to-design-parsed-sunbeam.md\" -Force; Test-Path \"C:\\\\CodeProjects\\\\dolev_ai\\\\.claude\\\\plans\\\\i-want-to-design-parsed-sunbeam.md\")",
+      "PowerShell(Copy-Item -Path \"$env:USERPROFILE\\\\.claude\\\\plans\\\\i-want-to-design-parsed-sunbeam.md\" -Destination \"C:\\\\CodeProjects\\\\dolev_ai\\\\.claude\\\\plans\\\\i-want-to-design-parsed-sunbeam.md\" -Force; Test-Path \"C:\\\\CodeProjects\\\\dolev_ai\\\\.claude\\\\plans\\\\i-want-to-design-parsed-sunbeam.md\")",
+      "Bash(npm --version)",
+      "PowerShell(python --version)",
+      "PowerShell(node --version)",
+      "PowerShell(npm --version)",
+      "PowerShell($env:PATH += \";C:\\\\Program Files\\\\nodejs\"; node --version; npm --version)",
+      "PowerShell(Get-ChildItem \"$env:LOCALAPPDATA\\\\ms-playwright\" | Select-Object Name)",
+      "Bash(git commit -m ' *)"
     ]
   }
 }

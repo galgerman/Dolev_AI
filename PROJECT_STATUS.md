@@ -1,103 +1,98 @@
 # Dolev AI — Project Status & Handoff
 
-> **Last updated:** 2026-05-21  
-> **Purpose:** Full context for any agent (or developer) continuing this work cold.
+> **Last updated:** 2026-05-22
+> **Status:** end-to-end working — Ollama + local LLM + live dashboard
 
 ---
 
-## What Was Built
+## What this is
 
-A Twitter/X-driven stock-trend agent with a live monitoring web UI.
+A Twitter/X-driven stock-trend agent with a live monitoring web UI. Reads finance Twitter, asks a **local LLM** what each post implies for markets, builds a trust graph (accounts → tickers + themes → tickers), and emits Telegram alerts when conviction crosses a threshold.
 
-### Phase 1 — Core Pipeline (complete)
-Scrapes finance Twitter → extracts tickers → scores sentiment → trust-graph strategy → Claude synthesis → Telegram alerts.
+**No order execution** in this phase. Signals are recorded for validation.
 
-### Phase 1.5 — Monitoring Web UI (complete)
-FastAPI + WebSocket backend embedded in the agent process. React/Vite/D3/Recharts frontend served from `web/dist/`. Live dashboard shows trust graph building, ticker scores climbing toward threshold, score chart, drilldown panel.
+---
+
+## Architecture (current — Phase 1.6)
+
+```
+APScheduler (in-process)
+   ├── collect()  every 5 min  →  Playwright scrape → save_tweets → submit to extractor
+   ├── evaluate() every 2 min  →  load extractions  → score tickers+themes → strategy → synth → telegram
+   └── prune()    every 60 min →  trim old time-series rows + tweets > 30 days
+
+ExtractionWorker (background tasks, always running)
+   queue (bounded 1000, drop-oldest)
+   2 workers × asyncio.gather → POST http://localhost:11434/v1/chat/completions
+   one HTTP call per tweet (single-tweet prompts — small models can't batch reliably)
+   persists Extraction → SQLite → publishes WS event llm.call + post.extracted
+
+FastAPI + uvicorn (same event loop)
+   REST: /api/tickers, /api/themes, /api/signals, /api/extractions, /api/db/*, /api/llm/*
+   WebSocket: /api/stream → snapshot on connect, then live events
+
+React SPA (web/dist served by FastAPI)
+   Header     — agent/X-auth buttons + LLM badge (live call counter + avg latency + backlog) + DB button
+   Leaderboard— top tickers by |score|, threshold progress bars, pulse on near_threshold
+   TrustGraph — D3 force layout: account nodes (circle) + ticker nodes (circle) + theme nodes (rounded square)
+                edge hover → fetches source post, dashed = acct→theme, dotted = theme→ticker cascade
+   ExtractionFeed — live stream of each post's LLM extraction (tickers + themes + sentiment + summary)
+   ScoreChart  — Recharts multi-line, threshold reference lines
+   TickerDrilldown— score timeline, contributing accounts, tweets
+   DBBrowser   — modal with 6 tabs (extractions/tweets/ticker_scores/theme_scores/edges/signals)
+                paginated, search, raw LLM JSON viewable per row, auto-refresh
+   SignalFiredToast — overlay on signal.fired
+```
 
 ---
 
 ## Repository
 
-**Local:** `C:\CodeProjects\dolev_ai`  
-**Remote:** https://github.com/galgerman/Dolev_AI  
-**Branch:** main (all work pushed)
+**Local:** `C:\CodeProjects\dolev_ai`
+**Remote:** https://github.com/galgerman/Dolev_AI
+**Branch:** master
 
 ---
 
-## Full File Map
+## How to Run
 
+### One-time setup
+```powershell
+# Python deps
+py -3.12 -m pip install -e ".[dev]"
+
+# Playwright (only headless shell needed — real scraping uses system Chrome/Edge)
+playwright install chromium
+
+# Ollama (Windows)
+# Download from https://ollama.com/download — runs as a service on :11434
+ollama pull qwen2.5:7b   # ~4.7GB
+
+# Pick the model for your hardware
+py -3.12 scripts/probe_hardware.py    # writes config/active_model.yaml
+
+# Frontend
+$env:PATH += ";C:\Program Files\nodejs"
+cd web; & "C:\Program Files\nodejs\npm.cmd" install
+& "C:\Program Files\nodejs\npm.cmd" run build
+
+# Universe + X login (do these once)
+py -3.12 scripts/download_universe.py    # NYSE + NASDAQ symbols → config/universe.csv
+# X login is triggered from the dashboard's "Connect X" button
 ```
-dolev_ai/
-├── pyproject.toml                   # Python package, deps, pytest config
-├── .env                             # Filled with dummy keys (MUST be replaced before full run)
-├── .env.example
-├── config/
-│   ├── seeds.yaml                   # ~30 seed accounts, tiers 1-3
-│   ├── settings.yaml                # thresholds, cadences, model names
-│   └── universe.csv                 # 12,135 NYSE+NASDAQ symbols (downloaded)
-├── scripts/
-│   ├── download_universe.py         # Pulls nasdaqtrader.com FTP — run once/weekly
-│   ├── login_x.py                   # One-time X login, saves session to browser_profile/
-│   └── serve_ui.py                  # Dev helper: start ONLY the web server (no scraping)
-├── src/dolev_ai/
-│   ├── models.py                    # RawTweet, Account, TickerScore, Signal dataclasses
-│   ├── db.py                        # SQLAlchemy + SQLite (data/dolev.db)
-│   ├── events.py                    # EventBus — async pub/sub, bounded queues
-│   ├── main.py                      # Daemon: APScheduler + uvicorn in same event loop
-│   ├── sources/
-│   │   ├── __init__.py              # TweetSource ABC
-│   │   └── playwright_source.py     # Scrapes X.com with persistent browser session
-│   ├── strategies/
-│   │   ├── __init__.py              # SignalStrategy ABC
-│   │   └── trust_graph.py           # Threshold + cooldown + voice-count gating
-│   ├── analysis/
-│   │   ├── ticker.py                # Regex $[A-Z]{1,5} + universe.csv validation
-│   │   ├── sentiment.py             # FinBERT (ProsusAI/finbert) wrapper
-│   │   ├── credibility.py           # Per-account weight from seeds.yaml tiers
-│   │   └── aggregator.py           # Rolling score with time-decay; returns (scores, edges)
-│   ├── synth/
-│   │   └── synthesizer.py           # Claude call → Signal JSON (claude-sonnet-4-6)
-│   ├── alert/
-│   │   └── telegram.py              # httpx POST to Telegram Bot API
-│   └── web/
-│       ├── server.py                # create_app() factory — FastAPI + CORS + static SPA
-│       ├── api.py                   # REST: /api/health, /tickers/live, /tickers/{t},
-│       │                            #       /signals/recent, /graph/snapshot, /accounts
-│       │                            #       + /api/auth/x/status, /api/auth/x/login
-│       ├── ws.py                    # WebSocket /api/stream — snapshot on connect, then live events
-│       ├── schemas.py               # Pydantic response models
-│       └── auth.py                  # X login state machine — runs Playwright in thread pool
-├── web/                             # React SPA (separate from Python tree)
-│   ├── package.json
-│   ├── vite.config.ts               # proxies /api/* → :8000 in dev mode
-│   ├── dist/                        # Built output — served by FastAPI StaticFiles
-│   └── src/
-│       ├── App.tsx                  # 3-col × 2-row grid layout
-│       ├── types.ts                 # Mirrors Python models + WsEvent union type
-│       ├── api.ts                   # fetch wrappers incl. xAuthStatus, xAuthLogin
-│       ├── hooks/
-│       │   ├── useEventStream.ts    # WebSocket hook, auto-reconnects
-│       │   └── useLiveTickers.ts    # Combines REST snapshot + WS deltas into LiveState
-│       └── components/
-│           ├── Header.tsx           # Title + threshold + WS status + X login button
-│           ├── Leaderboard.tsx      # Top 20 tickers, ThresholdProgressBar, pulse on near_threshold
-│           ├── TrustGraph.tsx       # D3 force-directed graph (account→ticker edges)
-│           ├── ScoreChart.tsx       # Recharts multi-line + threshold ReferenceLine
-│           ├── TickerDrilldown.tsx  # Score history, contributing accounts, tweets
-│           └── SignalFiredToast.tsx # Auto-dismiss toast when signal.fired fires
-├── tests/
-│   ├── fixtures/tweets.json
-│   ├── test_aggregator.py           # 7 tests — all passing
-│   ├── test_trust_graph.py          # 9 tests — all passing
-│   ├── test_event_bus.py            # 5 tests — all passing
-│   ├── test_api.py                  # 7 tests — all passing
-│   └── test_ws.py                   # 2 tests — all passing
-└── .claude/
-    ├── plans/                       # Archived design docs
-    └── skills/
-        ├── setup-dolev-ai/SKILL.md  # One-shot setup skill
-        └── run-dolev-ai/SKILL.md    # Run agent + UI skill
+
+### Run the agent
+```powershell
+# Full daemon (auto-starts scrape + extraction + UI on http://localhost:8000)
+py -3.12 -m dolev_ai.main --dry-run
+
+# Or dev mode (UI only, click Start Agent in the header to begin scraping)
+py -3.12 scripts/serve_ui.py
+```
+
+### Tests
+```powershell
+py -3.12 -m pytest -q -m "not slow"     # 56 passing
 ```
 
 ---
@@ -106,133 +101,174 @@ dolev_ai/
 
 | Item | Detail |
 |---|---|
-| OS | Windows 11 Home 10.0.26200 |
-| Python | 3.12.3 (via `py -3.12`) — installed at `C:\Users\User\AppData\Local\Programs\Python\Python312` |
-| Node | 24.15.0 — at `C:\Program Files\nodejs` (NOT on PATH by default, use `& "C:\Program Files\nodejs\npm.cmd"`) |
-| Playwright | 1.60.0 — bundled Chromium has VS runtime issue on this machine (headful mode fails) |
-| Edge | `C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe` — works for headful Playwright |
-| Chrome | `C:\Program Files\Google\Chrome\Application\chrome.exe` — also available |
-
-**Critical:** Always invoke Python as `py -3.12`, not `python` (that's 3.10).  
-**Critical:** Add Node to PATH each session: `$env:PATH += ";C:\Program Files\nodejs"`
+| OS | Windows 11 |
+| Python | 3.12.3 (use `py -3.12`) |
+| Node | 24+ at `C:\Program Files\nodejs` (use `& "C:\Program Files\nodejs\npm.cmd"`) |
+| Ollama | 0.24.0 on http://localhost:11434 |
+| Model | `qwen2.5:7b` (default; ~28s/tweet on RTX 3050 8GB) |
+| Browser | System Chrome or Edge (Playwright headful via `executable_path`) |
 
 ---
 
-## Running the App
+## Configuration
 
-### Dev-only web server (no scraping, no X login needed):
-```powershell
-cd C:\CodeProjects\dolev_ai
-py -3.12 scripts/serve_ui.py
-# → http://localhost:8000
+| File | What |
+|---|---|
+| `.env` | `ANTHROPIC_API_KEY`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` (dummy values OK for dry-run/non-synth) |
+| `config/settings.yaml` | cadences, thresholds, retention policy |
+| `config/models.yaml` | LLM catalog — edit when hardware changes |
+| `config/active_model.yaml` | auto-generated by `probe_hardware.py` |
+| `config/themes.yaml` | ~80 theme keys + ticker weights for cascade scoring |
+| `config/seeds.yaml` | ~30 finance accounts with tier 1-3 credibility |
+| `config/universe.csv` | NYSE + NASDAQ symbols (12k+ rows) |
+
+---
+
+## DB schema
+
+```
+tweets               (id PK, author, text, created_at, like/retweet/reply, url)
+extractions          (id PK, tweet_id FK, model, is_finance, summary, raw_json, latency_ms, created_at)
+extracted_tickers    (extraction_id FK, ticker, sentiment, confidence, explicit)
+extracted_themes     (extraction_id FK, theme, sentiment, confidence)
+ticker_scores        (ticker, score, voices, tweet_count, window_*)              — time-series
+theme_scores         (theme,  score, voices, tweet_count, window_*)              — time-series
+graph_edges          (from_id, to_id, edge_type, weight, sentiment, tweet_id)    — time-series
+signals              (ticker, side, conviction, rationale, key_drivers)
+alert_log            (ticker, side, conviction, sent_at, channel)
 ```
 
-### Full agent (dry-run, alerts to stdout):
-```powershell
-py -3.12 -m dolev_ai.main --dry-run
-```
+**Retention** (auto-pruned hourly):
+- `ticker_scores` / `theme_scores` / `graph_edges` → 24 hours
+- `tweets` + `extractions` (with cascade) → 30 days
 
-### Full agent (live Telegram alerts):
-```powershell
-py -3.12 -m dolev_ai.main
-```
+Configurable in `settings.yaml` under `retention:`.
 
-### Run tests:
-```powershell
-py -3.12 -m pytest -q -m "not slow"
-# → 38 passed
-```
+---
 
-### Rebuild frontend (needed after any web/src changes):
-```powershell
-$env:PATH += ";C:\Program Files\nodejs"
-cd C:\CodeProjects\dolev_ai\web
-& "C:\Program Files\nodejs\npm.cmd" run build
+## Scoring formula
+
+```
+direct_score(ticker) = Σ extractions mentioning ticker:
+                       sign × confidence × credibility(author) × engagement × time_decay
+
+theme_score(theme)   = same formula, summed over theme mentions
+
+cascade(ticker)      = Σ themes containing ticker:
+                       theme_score × themes.yaml[theme].tickers[ticker] × 0.5
+
+final_score(ticker)  = direct_score + cascade
+
+Signal fires when:   |final_score| >= 5.0
+                  AND unique_credible_voices >= 3
+                  AND not in cooldown (4h, bypassed if score doubles)
 ```
 
 ---
 
-## API Keys (.env)
+## Endpoints (REST)
 
-File at `C:\CodeProjects\dolev_ai\.env` currently has **dummy values**. Replace before real runs:
-
-```
-ANTHROPIC_API_KEY=sk-ant-...     # claude-sonnet-4-6 for signal synthesis
-TELEGRAM_BOT_TOKEN=...           # from @BotFather on Telegram
-TELEGRAM_CHAT_ID=...             # your chat ID (GET /bot<token>/getUpdates)
-```
-
-Signal synthesis (Claude) and Telegram alerts fail silently with dummy keys — scraping, scoring, and the dashboard all work without them.
+| Method | Path | Purpose |
+|---|---|---|
+| GET | `/api/health` | basic liveness |
+| GET | `/api/tickers/live` | top tickers in last hour |
+| GET | `/api/tickers/{ticker}` | drilldown — score history, contributors, tweets |
+| GET | `/api/themes/active` | top themes by score |
+| GET | `/api/themes/{theme}` | drilldown |
+| GET | `/api/signals/recent` | fired signals |
+| GET | `/api/graph/snapshot` | nodes + edges (last hour) |
+| GET | `/api/extractions/recent` | live feed data |
+| GET | `/api/edges/{id}` | single edge + source post |
+| GET | `/api/accounts` | seed accounts + credibility |
+| GET | `/api/llm/status` | model, healthy, backlog, **calls_total/finance/errors, avg_latency_ms, last_call_at** |
+| POST | `/api/llm/test_extract?limit=N` | **DEBUG** — re-submits last N tweets to extractor |
+| GET | `/api/db/stats` | row counts per table |
+| GET | `/api/db/{table}` | paginated rows — table ∈ {tweets, extractions, ticker_scores, theme_scores, graph_edges, signals} |
+| GET | `/api/agent/status` | running, started_at, mode |
+| POST | `/api/agent/start` \| `/stop` | toggle scraper + extractor |
+| GET | `/api/auth/x/status` | X login state |
+| POST | `/api/auth/x/login` | open Playwright login flow |
 
 ---
 
-## WebSocket Events (agent → browser)
+## WebSocket events
 
 | `type` | When |
 |---|---|
-| `snapshot` | On WS connect — hydrates full UI state |
-| `tweet.ingested` | Each new tweet saved |
-| `ticker.score_updated` | After each evaluate() cycle, per ticker |
-| `ticker.near_threshold` | When threshold_progress crosses 0.75 |
-| `signal.synthesizing` | Just before Claude API call |
-| `signal.fired` | After synthesizer + alerter |
-| `graph.edge_added` | New (account, ticker) edge in trust graph |
-| `auth.x.status_changed` | X login state machine transition |
+| `snapshot` | on connect — full state hydration |
+| `collection.{started,account_started,account_completed,finished,failed}` | scrape progress |
+| `tweet.ingested` | provisional event during scrape (before LLM) |
+| `post.extracting` / `post.extracted` | LLM lifecycle per tweet |
+| `llm.call` | one event per completed Ollama call (tweet_id, latency_ms, is_finance, n_tickers, n_themes) |
+| `extraction.backlog` | every 5s — current queue depth |
+| `ticker.discovered` / `ticker.score_updated` / `ticker.near_threshold` | scoring |
+| `theme.score_updated` / `theme.activated` | theme scoring |
+| `graph.edge_added` | new edge in trust graph |
+| `signal.synthesizing` / `signal.fired` | Claude synth + alert |
+| `auth.x.status_changed` | X login state machine |
+| `db.pruned` | retention job emitted counts deleted |
 
 ---
 
-## Current Blocker — X Login Button
+## Operating notes
 
-**Status:** Partially working. The login button exists in the Header and the backend state machine is wired up, but the Playwright browser fails to open from within the `run_in_executor` thread with this error:
+### Throughput
+- 7B model on RTX 3050 8GB: ~28s/tweet (model can't batch internally)
+- Collect every 5min gathers ~30-50 tweets → ~15-25 min of LLM work
+- Queue is bounded (1000) with drop-oldest — older tweets sacrificed before recent ones
+- For faster throughput: `ollama pull qwen2.5:3b` then re-run `probe_hardware.py` (~5s/tweet, weaker quality)
 
-```
-BrowserType.launch_persistent_context: Opening in existing browser session.
-This usually means that the profile is already in use by another instance of Chromium.
-```
+### Storage growth
+- Auto-pruning: `ticker_scores`/`theme_scores`/`graph_edges` trimmed to last 24h, tweets/extractions to last 30 days
+- Tunable in `config/settings.yaml` → `retention:`
+- Manual: `VACUUM` is available via `db.vacuum_db()` but not on the schedule
 
-**Root cause:** A leftover Edge session was saved to `browser_profile/` from an earlier manual test. Edge detects the profile is locked / already open and refuses to launch a second instance.
-
-**Fix needed (one of these):**
-1. **Delete the lock file before launching** — `browser_profile/SingletonLock` (Chromium lock file). Add this to `_sync_login()` in `src/dolev_ai/web/auth.py` before `launch_persistent_context`:
-   ```python
-   import os
-   lock = pathlib.Path(profile_dir) / "SingletonLock"
-   if lock.exists():
-       lock.unlink()
-   ```
-2. **Clear the stale profile** — if `browser_profile/` exists but user isn't actually logged in yet, wipe it first. Check for `browser_profile/Default/Cookies` as the indicator of a real login.
-3. **Nuke and re-test** — delete `C:\CodeProjects\dolev_ai\browser_profile\` entirely, restart the server, click "Connect X" — should work cleanly.
-
-**Relevant file:** `src/dolev_ai/web/auth.py` — `_sync_login()` function, lines ~70-91.
-
-**What IS working:**
-- `executable_path` approach (using system Edge/Chrome) is correct and confirmed working in isolation
-- `run_in_executor` threading approach is correct
-- The button state machine (idle → opening → waiting → complete) works end-to-end
-- WS event `auth.x.status_changed` broadcasts correctly to the browser
+### Observability
+- Header LLM badge — live call counter, avg latency, error count, backlog meter, flash on new call
+- DB Browser modal (⛁ button) — paginated views of every table, search on tweets/extractions, expand rows to see raw LLM JSON
+- Server logs — `httpx` lines show each Ollama call; `dolev_ai.main` logs collect/evaluate cycles
 
 ---
 
-## Scoring Formula (reference)
+## Tests (56 passing)
 
-```
-score(ticker) = Σ over tweets in window:
-    sentiment_sign (+1/-1/0)
-  × confidence (0..1, from FinBERT)
-  × credibility(author) (0.2..1.0, from seeds.yaml tier)
-  × log(1 + likes + 2·retweets)
-  × exp(−age_minutes / 30)
-
-threshold_progress = abs(score) / threshold   # 0..∞, shown as progress bar
-```
-
-Signal fires when: `abs(score) >= 5.0 AND unique_credible_voices >= 3 AND not in cooldown`.
+- `test_aggregator.py` — direct + cascade scoring math
+- `test_trust_graph.py` — threshold + cooldown + voice gating
+- `test_event_bus.py` — pub/sub correctness, drop-oldest
+- `test_api.py` + `test_ws.py` — REST + WebSocket shapes
+- `test_agent_runtime.py` — start/stop worker, collect/evaluate publish events
+- `test_prune.py` — DB pruning + cascade through extractions
+- `test_ticker.py` — regex extraction (legacy fast path, still used as hint)
 
 ---
 
-## Phase 2 (not started — deferred)
+## What's NOT here (deferred)
 
-- Order execution via Alpaca or IBKR (consumes the same `Signal` dataclass)
-- Historical accuracy scoring for credibility (compare past signals vs. realized returns)
-- `StockTwits` / X API as alternate `TweetSource` implementations
+- Order execution (Alpaca/IBKR adapter consuming `Signal`)
+- Historical-accuracy credibility scoring (track signal vs. realized return)
 - Backtester
+- Free-form theme discovery / consolidation
+- Mobile-responsive UI
+- Auth / multi-user
+
+---
+
+## Quick verification (5 min)
+
+```powershell
+# 1. Verify Ollama running and model present
+Invoke-RestMethod "http://localhost:11434/api/tags"   # should list qwen2.5:7b
+
+# 2. Start agent
+py -3.12 -m dolev_ai.main --dry-run
+
+# 3. Open dashboard
+# http://localhost:8000
+
+# 4. Force an extraction without waiting 5 min for a scrape
+Invoke-RestMethod -Method POST "http://localhost:8000/api/llm/test_extract?limit=5"
+# Watch the LLM badge counter climb from 0 → 5
+
+# 5. Browse DB
+# Click the ⛁ DB button → Extractions tab → expand a row → see raw LLM JSON
+```

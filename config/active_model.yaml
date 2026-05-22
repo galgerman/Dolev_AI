@@ -1,0 +1,7 @@
+name: qwen2.5:7b
+provider: openai_compat
+endpoint: http://localhost:11434/v1
+batch_size: 8
+max_concurrent: 2
+timeout_s: 60
+max_queue: 1000

@@ -58,3 +58,26 @@ async def test_multiple_publishes_ordered():
     while not q.empty():
         results.append(q.get_nowait()["seq"])
     assert results == [0, 1, 2, 3, 4]
+
+
+@pytest.mark.asyncio
+async def test_subscribe_replays_current_collection_state():
+    bus = EventBus()
+    await bus.publish({"type": "collection.account_started", "handle": "deitaone", "index": 1, "total": 2})
+
+    q = bus.subscribe()
+
+    assert q.get_nowait() == {"type": "collection.account_started", "handle": "deitaone", "index": 1, "total": 2}
+
+
+@pytest.mark.asyncio
+async def test_collection_started_clears_previous_provisional_replay():
+    bus = EventBus()
+    await bus.publish({"type": "ticker.discovered", "ticker": "NVDA", "voices": 1, "tweet_count": 1})
+    await bus.publish({"type": "graph.edge_added", "author": "deitaone", "ticker": "NVDA", "weight": 1.0})
+    await bus.publish({"type": "collection.started", "total": 3, "completed": 0})
+
+    q = bus.subscribe()
+
+    assert q.get_nowait() == {"type": "collection.started", "total": 3, "completed": 0}
+    assert q.empty()

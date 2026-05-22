@@ -1,4 +1,6 @@
 import { useState } from 'react'
+import { DBBrowser } from './components/DBBrowser'
+import { ExtractionFeed } from './components/ExtractionFeed'
 import { Header } from './components/Header'
 import { Leaderboard } from './components/Leaderboard'
 import { ScoreChart } from './components/ScoreChart'
@@ -10,6 +12,7 @@ import { useLiveTickers } from './hooks/useLiveTickers'
 export default function App() {
   const { state, wsStatus } = useLiveTickers()
   const [selectedTicker, setSelectedTicker] = useState<string | null>(null)
+  const [showDB, setShowDB] = useState(false)
 
   const lastEval = state.tickers[0]?.window_end
     ? new Date(state.tickers[0].window_end).toLocaleTimeString()
@@ -17,11 +20,21 @@ export default function App() {
 
   return (
     <div className="flex flex-col h-screen overflow-hidden">
-      <Header wsStatus={wsStatus} threshold={state.threshold} lastEval={lastEval} xAuth={state.xAuth} />
+      <Header
+        wsStatus={wsStatus}
+        threshold={state.threshold}
+        lastEval={lastEval}
+        xAuth={state.xAuth}
+        collection={state.collection}
+        llmStatus={state.llmStatus}
+        extractionBacklog={state.extractionBacklog}
+        lastLlmCall={state.lastLlmCall}
+        onOpenDB={() => setShowDB(true)}
+      />
 
       {/* Main grid: 3 columns × 2 rows */}
       <div className="flex-1 min-h-0 grid grid-cols-3 grid-rows-2 gap-3 p-3">
-        {/* Row 1, col 1: Leaderboard */}
+        {/* Col 1: Leaderboard (full height) */}
         <div className="row-span-2 min-h-0">
           <Leaderboard
             tickers={state.tickers}
@@ -32,8 +45,8 @@ export default function App() {
           />
         </div>
 
-        {/* Row 1, col 2: Trust Graph */}
-        <div className="col-span-1 min-h-0">
+        {/* Col 2 row 1: Trust Graph */}
+        <div className="min-h-0">
           <TrustGraph
             nodes={state.graphNodes}
             edges={state.graphEdges}
@@ -41,7 +54,7 @@ export default function App() {
           />
         </div>
 
-        {/* Row 1, col 3: Drilldown (or placeholder) */}
+        {/* Col 3 row 1 + 2: Extraction Feed (default) or Drilldown when a ticker is selected */}
         <div className="row-span-2 min-h-0">
           {selectedTicker ? (
             <TickerDrilldown
@@ -50,14 +63,14 @@ export default function App() {
               onClose={() => setSelectedTicker(null)}
             />
           ) : (
-            <div className="panel flex flex-col items-center justify-center h-full text-gray-700 text-xs gap-2">
-              <span className="text-3xl">⬅</span>
-              <span>Click a ticker to inspect</span>
-            </div>
+            <ExtractionFeed
+              extractions={state.extractions}
+              onTickerClick={setSelectedTicker}
+            />
           )}
         </div>
 
-        {/* Row 2, col 2: Score chart */}
+        {/* Col 2 row 2: Score chart */}
         <div className="min-h-0">
           <ScoreChart
             scoreHistory={state.scoreHistory}
@@ -67,10 +80,10 @@ export default function App() {
         </div>
       </div>
 
-      {/* Toast overlay for new signals */}
       {state.lastFiredSignal && (
         <SignalFiredToast signal={state.lastFiredSignal} />
       )}
+      {showDB && <DBBrowser onClose={() => setShowDB(false)} />}
     </div>
   )
 }

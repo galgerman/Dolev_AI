@@ -3,7 +3,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import pathlib
+import sqlite3
+import subprocess
 from typing import Literal
 
 logger = logging.getLogger(__name__)
@@ -26,7 +29,7 @@ def configure(profile_dir: pathlib.Path, event_bus) -> None:
 def is_logged_in() -> bool:
     if _profile_dir is None or not _profile_dir.exists():
         return False
-    return any(_profile_dir.iterdir())
+    return _has_x_auth_cookie(_profile_dir)
 
 
 def get_state() -> LoginState:
@@ -57,8 +60,12 @@ async def _run_login() -> None:
         loop = asyncio.get_event_loop()
         await loop.run_in_executor(None, _sync_login, str(_profile_dir))
 
-        _state = "complete"
-        logger.info("X login: session saved")
+        if is_logged_in():
+            _state = "complete"
+            logger.info("X login: session saved")
+        else:
+            _state = "error"
+            logger.warning("X login: browser closed without a saved X auth session")
     except Exception as e:
         _state = "error"
         logger.error(f"X login failed: {e}", exc_info=True)
@@ -67,14 +74,13 @@ async def _run_login() -> None:
 
 
 _BROWSER_CANDIDATES = [
-    r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
     r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+    r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
     r"C:\Program Files\Microsoft\Edge\Application\msedge.exe",
 ]
 
 
 def _find_browser() -> str:
-    import os
     for path in _BROWSER_CANDIDATES:
         if os.path.exists(path):
             return path
@@ -84,19 +90,75 @@ def _find_browser() -> str:
 
 
 def _sync_login(profile_dir: str) -> None:
-    from playwright.sync_api import sync_playwright
     exe = _find_browser()
     logger.info(f"X login: using browser at {exe}")
-    with sync_playwright() as p:
-        ctx = p.chromium.launch_persistent_context(
-            profile_dir,
-            executable_path=exe,
-            headless=False,
-            args=["--start-maximized"],
-        )
-        page = ctx.new_page()
-        page.goto("https://x.com/login")
-        ctx.wait_for_event("close", timeout=0)
+    _remove_stale_profile_locks(profile_dir)
+    process = subprocess.Popen(_browser_login_args(exe, profile_dir))
+    process.wait()
+
+
+def _browser_login_args(exe: str, profile_dir: str) -> list[str]:
+    return [
+        exe,
+        f"--user-data-dir={profile_dir}",
+        "--profile-directory=Default",
+        "--new-window",
+        "--start-maximized",
+        "--no-first-run",
+        "--no-default-browser-check",
+        "https://x.com/i/flow/login",
+    ]
+
+
+def _remove_stale_profile_locks(profile_dir: str) -> None:
+    profile_path = pathlib.Path(profile_dir)
+    for name in ("SingletonLock", "SingletonSocket", "SingletonCookie"):
+        lock_path = profile_path / name
+        try:
+            if lock_path.exists() or lock_path.is_symlink():
+                lock_path.unlink()
+                logger.info(f"X login: removed stale Chromium profile lock {lock_path}")
+        except OSError as e:
+            logger.warning(f"X login: could not remove profile lock {lock_path}: {e}")
+
+
+def _has_x_auth_cookie(profile_dir: pathlib.Path) -> bool:
+    for cookie_db in _cookie_db_candidates(profile_dir):
+        if _cookie_db_has_x_auth(cookie_db):
+            return True
+    return False
+
+
+def _cookie_db_candidates(profile_dir: pathlib.Path) -> list[pathlib.Path]:
+    return [
+        profile_dir / "Default" / "Network" / "Cookies",
+        profile_dir / "Default" / "Cookies",
+    ]
+
+
+def _cookie_db_has_x_auth(cookie_db: pathlib.Path) -> bool:
+    if not cookie_db.exists():
+        return False
+    try:
+        with sqlite3.connect(f"file:{cookie_db}?mode=ro", uri=True) as conn:
+            row = conn.execute(
+                """
+                SELECT 1
+                FROM cookies
+                WHERE name = 'auth_token'
+                  AND (
+                    host_key = 'x.com'
+                    OR host_key = '.x.com'
+                    OR host_key = 'twitter.com'
+                    OR host_key = '.twitter.com'
+                  )
+                LIMIT 1
+                """
+            ).fetchone()
+            return row is not None
+    except sqlite3.Error as e:
+        logger.debug(f"X login: could not inspect cookie DB {cookie_db}: {e}")
+        return False
 
 
 async def _publish_state() -> None:

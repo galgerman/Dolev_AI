@@ -33,14 +33,28 @@ Rules:
 - Be sceptical; social media signals are noisy; default to moderate conviction unless evidence is overwhelming"""
 
 
-def _build_user_message(ticker: str, ts: TickerScore, tweet_texts: list[str]) -> str:
+def _build_user_message(
+    ticker: str,
+    ts: TickerScore,
+    tweet_texts: list[str],
+    themes: list[tuple[str, float]] | None = None,
+) -> str:
     tweets_block = "\n".join(f"- {t[:280]}" for t in tweet_texts[:10])
+    direct = ts.direct_score if hasattr(ts, "direct_score") else 0.0
+    cascade = ts.cascade_score if hasattr(ts, "cascade_score") else 0.0
+    themes_block = ""
+    if themes:
+        lines = [f"  - {name}: {score:+.2f}" for name, score in themes]
+        themes_block = "\nActive themes for this ticker (sector context):\n" + "\n".join(lines)
     return (
         f"Ticker: ${ticker}\n"
-        f"Aggregate score: {ts.score:.2f} "
+        f"Aggregate score: {ts.score:+.2f} "
         f"({'bullish' if ts.score > 0 else 'bearish'})\n"
+        f"  - direct mentions: {direct:+.2f}\n"
+        f"  - theme cascade : {cascade:+.2f}\n"
         f"Credible voices: {ts.unique_credible_voices}\n"
-        f"Window: last 60 minutes\n\n"
+        f"Window: last 60 minutes"
+        f"{themes_block}\n\n"
         f"Top tweets driving this signal:\n{tweets_block}"
     )
 
@@ -60,12 +74,13 @@ class Synthesizer:
         ticker: str,
         ts: TickerScore,
         tweet_texts: list[str],
+        themes: list[tuple[str, float]] | None = None,
     ) -> Signal:
         system: list[dict] = [{"type": "text", "text": _SYSTEM_PROMPT}]
         if self._cache:
             system[0]["cache_control"] = {"type": "ephemeral"}  # type: ignore[index]
 
-        user_msg = _build_user_message(ticker, ts, tweet_texts)
+        user_msg = _build_user_message(ticker, ts, tweet_texts, themes)
 
         for attempt in range(2):
             try:

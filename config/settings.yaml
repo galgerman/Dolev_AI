@@ -14,10 +14,11 @@ trust_graph:
   cooldown_hours: 4            # don't re-alert same ticker within this window
   cooldown_override_multiplier: 2.0  # bypass cooldown if score doubles
 
-sentiment:
-  model: ProsusAI/finbert
-  device: cpu                  # change to "cuda" if GPU available
-  batch_size: 16
+retention:
+  prune_interval_minutes: 60        # how often to run the DB pruner
+  tweets_keep_days: 30              # delete tweets + extractions older than this
+  scores_keep_hours: 24             # ticker_scores / theme_scores older than this
+  edges_keep_hours: 24              # graph_edges older than this
 
 synth:
   model: claude-sonnet-4-6
@@ -29,7 +30,7 @@ universe:
 
 playwright:
   headless: false              # keep true=headless; false helps debug & avoids bot detection
-  profile_dir: browser_profile
+  profile_dir: browser_profile_chrome
   request_delay_min_s: 3.0
   request_delay_max_s: 6.0
   max_accounts_per_poll: 50

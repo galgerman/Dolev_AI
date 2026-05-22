@@ -1,5 +1,6 @@
 import * as d3 from 'd3'
-import { useEffect, useRef } from 'react'
+import { useEffect, useRef, useState } from 'react'
+import { api } from '../api'
 import type { GraphEdge, GraphNode } from '../types'
 
 interface Props {
@@ -8,17 +9,32 @@ interface Props {
   onTickerClick: (ticker: string) => void
 }
 
-const TIER_COLORS = ['', '#60a5fa', '#34d399', '#9ca3af']  // tier 1,2,3
+const TIER_COLORS = ['', '#60a5fa', '#34d399', '#9ca3af']
 const BUY_COLOR = '#22c55e'
 const SELL_COLOR = '#ef4444'
 const NEUTRAL_COLOR = '#6b7280'
+const THEME_COLOR = '#a78bfa'  // purple for theme nodes
 
 function sentimentColor(s: string) {
   return s === 'positive' ? BUY_COLOR : s === 'negative' ? SELL_COLOR : NEUTRAL_COLOR
 }
 
+function nodeRadius(d: GraphNode) {
+  if (d.type === 'account') return 4 + d.size * 10
+  if (d.type === 'theme') return 6 + d.size * 16
+  return 6 + d.size * 18
+}
+
+function edgeDashArray(t?: string): string {
+  if (t === 'acct_theme') return '4 3'
+  if (t === 'theme_ticker') return '2 4'
+  return ''
+}
+
 export function TrustGraph({ nodes, edges, onTickerClick }: Props) {
   const svgRef = useRef<SVGSVGElement>(null)
+  const [showThemes, setShowThemes] = useState(true)
+  const [showNeutral, setShowNeutral] = useState(false)
 
   useEffect(() => {
     if (!svgRef.current) return
@@ -26,7 +42,14 @@ export function TrustGraph({ nodes, edges, onTickerClick }: Props) {
     const { width, height } = svgRef.current.getBoundingClientRect()
     svg.selectAll('*').remove()
 
-    if (nodes.length === 0) {
+    const filteredNodes = nodes.filter(n => showThemes || n.type !== 'theme')
+    const filteredEdges = edges.filter(e => {
+      if (!showThemes && (e.edge_type === 'acct_theme' || e.edge_type === 'theme_ticker')) return false
+      if (!showNeutral && e.sentiment === 'neutral') return false
+      return true
+    })
+
+    if (filteredNodes.length === 0) {
       svg.append('text')
         .attr('x', width / 2).attr('y', height / 2)
         .attr('text-anchor', 'middle').attr('fill', '#374151')
@@ -37,24 +60,21 @@ export function TrustGraph({ nodes, edges, onTickerClick }: Props) {
 
     const g = svg.append('g')
 
-    // Zoom + pan
     svg.call(
       d3.zoom<SVGSVGElement, unknown>()
         .scaleExtent([0.3, 4])
         .on('zoom', e => g.attr('transform', e.transform))
     )
 
-    const nodeMap = new Map(nodes.map(n => [n.id, n]))
+    const nodeMap = new Map(filteredNodes.map(n => [n.id, n]))
+    const validEdges = filteredEdges.filter(e => nodeMap.has(e.source) && nodeMap.has(e.target))
 
-    // Filter edges to only those with valid source+target
-    const validEdges = edges.filter(e => nodeMap.has(e.source) && nodeMap.has(e.target))
-
-    const sim = d3.forceSimulation(nodes as any)
+    const sim = d3.forceSimulation(filteredNodes as any)
       .force('link', d3.forceLink(validEdges.map(e => ({ ...e, source: e.source, target: e.target })))
         .id((d: any) => d.id)
-        .distance(80)
+        .distance((e: any) => e.edge_type === 'theme_ticker' ? 60 : 80)
         .strength(0.4))
-      .force('charge', d3.forceManyBody().strength(-120))
+      .force('charge', d3.forceManyBody().strength(-140))
       .force('center', d3.forceCenter(width / 2, height / 2))
       .force('collision', d3.forceCollide().radius((d: any) => nodeRadius(d) + 6))
 
@@ -63,17 +83,18 @@ export function TrustGraph({ nodes, edges, onTickerClick }: Props) {
       .data(validEdges)
       .join('line')
       .attr('stroke', d => sentimentColor(d.sentiment))
-      .attr('stroke-opacity', 0.35)
+      .attr('stroke-opacity', d => d.edge_type === 'theme_ticker' ? 0.25 : 0.4)
       .attr('stroke-width', d => Math.max(0.5, d.weight * 3))
+      .attr('stroke-dasharray', d => edgeDashArray(d.edge_type))
+      .attr('cursor', d => d.tweet_id || d.id ? 'pointer' : 'default')
 
     const dragBehavior = d3.drag<SVGGElement, GraphNode>()
       .on('start', (e, d: any) => { if (!e.active) sim.alphaTarget(0.3).restart(); d.fx = d.x; d.fy = d.y })
       .on('drag', (e, d: any) => { d.fx = e.x; d.fy = e.y })
       .on('end', (e, d: any) => { if (!e.active) sim.alphaTarget(0); d.fx = null; d.fy = null })
 
-    // Nodes
     const node = g.append('g').selectAll('g')
-      .data(nodes)
+      .data(filteredNodes)
       .join('g')
       .attr('cursor', d => d.type === 'ticker' ? 'pointer' : 'default')
       .on('click', (_, d) => {
@@ -81,31 +102,67 @@ export function TrustGraph({ nodes, edges, onTickerClick }: Props) {
       })
       .call(dragBehavior as any)
 
-    node.append('circle')
-      .attr('r', nodeRadius)
-      .attr('fill', d => {
-        if (d.type === 'account') return TIER_COLORS[d.tier] ?? '#9ca3af'
-        return d.sentiment === 'positive' ? BUY_COLOR : d.sentiment === 'negative' ? SELL_COLOR : NEUTRAL_COLOR
-      })
-      .attr('fill-opacity', 0.85)
-      .attr('stroke', '#111827')
-      .attr('stroke-width', 1.5)
+    // Theme nodes are rounded rectangles, tickers + accounts are circles
+    node.each(function (d) {
+      const sel = d3.select(this)
+      if (d.type === 'theme') {
+        const r = nodeRadius(d)
+        sel.append('rect')
+          .attr('x', -r).attr('y', -r * 0.6)
+          .attr('width', r * 2).attr('height', r * 1.2)
+          .attr('rx', 4).attr('ry', 4)
+          .attr('fill', d.sentiment === 'positive' ? BUY_COLOR : d.sentiment === 'negative' ? SELL_COLOR : THEME_COLOR)
+          .attr('fill-opacity', 0.7)
+          .attr('stroke', '#1f2937').attr('stroke-width', 1.5)
+      } else {
+        sel.append('circle')
+          .attr('r', nodeRadius(d))
+          .attr('fill', () => {
+            if (d.type === 'account') return TIER_COLORS[d.tier] ?? '#9ca3af'
+            return d.sentiment === 'positive' ? BUY_COLOR : d.sentiment === 'negative' ? SELL_COLOR : NEUTRAL_COLOR
+          })
+          .attr('fill-opacity', 0.85)
+          .attr('stroke', '#111827').attr('stroke-width', 1.5)
+      }
+    })
 
     node.append('text')
       .text(d => d.label)
       .attr('text-anchor', 'middle')
-      .attr('dy', d => nodeRadius(d) + 11)
-      .attr('font-size', d => d.type === 'ticker' ? 11 : 9)
-      .attr('fill', d => d.type === 'ticker' ? '#e5e7eb' : '#9ca3af')
+      .attr('dy', d => (d.type === 'theme' ? nodeRadius(d) * 0.8 : nodeRadius(d) + 11))
+      .attr('font-size', d => d.type === 'ticker' ? 11 : d.type === 'theme' ? 9 : 9)
+      .attr('fill', d => d.type === 'ticker' ? '#e5e7eb' : d.type === 'theme' ? '#ddd6fe' : '#9ca3af')
 
-    // Tooltip on hover
     const tooltip = d3.select('body').append('div')
-      .attr('class', 'fixed z-50 pointer-events-none bg-gray-800 text-xs text-gray-100 px-2 py-1 rounded shadow-lg opacity-0 transition-opacity')
+      .attr('class', 'fixed z-50 pointer-events-none bg-gray-800 text-xs text-gray-100 px-2 py-1 rounded shadow-lg opacity-0 transition-opacity max-w-md')
 
     node
       .on('mouseover', (e, d) => {
         tooltip.style('opacity', '1')
-          .html(`${d.label}<br/>type: ${d.type}${d.type === 'account' ? ` | tier ${d.tier}` : ''}<br/>size: ${d.size.toFixed(3)}`)
+          .html(`<strong>${d.label}</strong><br/>type: ${d.type}${d.type === 'account' ? ` | tier ${d.tier}` : ''}<br/>size: ${d.size.toFixed(3)}`)
+      })
+      .on('mousemove', e => {
+        tooltip.style('left', (e.clientX + 12) + 'px').style('top', (e.clientY - 8) + 'px')
+      })
+      .on('mouseout', () => tooltip.style('opacity', '0'))
+
+    // Edge hover: show source post if available
+    link
+      .on('mouseover', async (e, d: any) => {
+        tooltip.style('opacity', '1')
+          .html(`<em>${d.source.id ?? d.source} → ${d.target.id ?? d.target}</em><br/>weight: ${d.weight.toFixed(3)} · ${d.sentiment}<br/><span class="text-gray-400">loading post…</span>`)
+        if (d.id) {
+          try {
+            const detail = await api.edgeDetail(d.id)
+            if (detail.tweet) {
+              tooltip.html(
+                `<em>${d.source.id ?? d.source} → ${d.target.id ?? d.target}</em><br/>` +
+                `weight: ${d.weight.toFixed(3)} · ${d.sentiment}<br/>` +
+                `<span class="text-blue-300">@${detail.tweet.author}</span>: ${detail.tweet.text.slice(0, 180)}`
+              )
+            }
+          } catch { /* ignore */ }
+        }
       })
       .on('mousemove', e => {
         tooltip.style('left', (e.clientX + 12) + 'px').style('top', (e.clientY - 8) + 'px')
@@ -125,25 +182,33 @@ export function TrustGraph({ nodes, edges, onTickerClick }: Props) {
       sim.stop()
       tooltip.remove()
     }
-  }, [nodes, edges])
+  }, [nodes, edges, showThemes, showNeutral, onTickerClick])
 
   return (
     <div className="panel flex flex-col h-full">
-      <p className="panel-title">Trust Graph</p>
+      <div className="flex items-center justify-between mb-1">
+        <p className="panel-title">Trust Graph</p>
+        <div className="flex items-center gap-2 text-[10px] text-gray-500">
+          <label className="flex items-center gap-1 cursor-pointer">
+            <input type="checkbox" checked={showThemes} onChange={e => setShowThemes(e.target.checked)} className="accent-purple-500" />
+            themes
+          </label>
+          <label className="flex items-center gap-1 cursor-pointer">
+            <input type="checkbox" checked={showNeutral} onChange={e => setShowNeutral(e.target.checked)} className="accent-gray-500" />
+            neutral edges
+          </label>
+        </div>
+      </div>
       <div className="flex-1 min-h-0 relative">
         <svg ref={svgRef} className="w-full h-full" />
         <div className="absolute bottom-2 right-2 flex gap-3 text-xs text-gray-500">
-          <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-blue-400 inline-block" />T1 account</span>
+          <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-blue-400 inline-block" />T1</span>
           <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-green-400 inline-block" />T2</span>
-          <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-green-500 inline-block" />bullish ticker</span>
-          <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-red-500 inline-block" />bearish ticker</span>
+          <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-green-500 inline-block" />bull</span>
+          <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-red-500 inline-block" />bear</span>
+          <span className="flex items-center gap-1"><span className="w-2 h-1.5 rounded-sm bg-purple-400 inline-block" />theme</span>
         </div>
       </div>
     </div>
   )
-}
-
-function nodeRadius(d: GraphNode) {
-  if (d.type === 'account') return 4 + d.size * 10
-  return 6 + d.size * 18
 }

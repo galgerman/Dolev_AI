@@ -62,8 +62,8 @@ class PlaywrightSource(TweetSource):
     def _find_browser() -> str:
         import os
         candidates = [
-            r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
             r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+            r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
             r"C:\Program Files\Microsoft\Edge\Application\msedge.exe",
         ]
         for path in candidates:
