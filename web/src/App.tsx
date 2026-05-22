@@ -42,6 +42,7 @@ export default function App() {
             synthesising={state.synthesisingTickers}
             onSelect={setSelectedTicker}
             selected={selectedTicker}
+            themes={state.themes}
           />
         </div>
 

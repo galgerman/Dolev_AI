@@ -249,24 +249,26 @@ class Agent:
         since = datetime.utcnow() - timedelta(
             minutes=self._cfg.get("poll_cadence_minutes", 5) * 2
         )
-        logger.info(f"Collecting from {len(self._handles)} accounts since {since:%H:%M}…")
+        max_accounts = self._cfg.get("playwright", {}).get("max_accounts_per_poll", len(self._handles))
+        handles = self._handles[:max_accounts]
+        logger.info(f"Collecting from {len(handles)} accounts since {since:%H:%M}…")
         try:
             tweets: list[RawTweet] = []
             discovered_tickers: set[str] = set()
             await self._event_bus.publish({
                 "type": "collection.started",
-                "total": len(self._handles),
+                "total": len(handles),
                 "completed": 0,
                 "current_handle": None,
                 "tweets_found": 0,
                 "tickers_found": 0,
             })
-            for index, handle in enumerate(self._handles, start=1):
+            for index, handle in enumerate(handles, start=1):
                 await self._event_bus.publish({
                     "type": "collection.account_started",
                     "handle": handle,
                     "index": index,
-                    "total": len(self._handles),
+                    "total": len(handles),
                     "completed": index - 1,
                     "tweets_found": len(tweets),
                     "tickers_found": len(discovered_tickers),
@@ -290,7 +292,7 @@ class Agent:
                     "type": "collection.account_completed",
                     "handle": handle,
                     "index": index,
-                    "total": len(self._handles),
+                    "total": len(handles),
                     "completed": index,
                     "account_tweets": len(account_tweets),
                     "tweets_found": len(tweets),

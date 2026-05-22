@@ -34,7 +34,7 @@ function edgeDashArray(t?: string): string {
 export function TrustGraph({ nodes, edges, onTickerClick }: Props) {
   const svgRef = useRef<SVGSVGElement>(null)
   const [showThemes, setShowThemes] = useState(true)
-  const [showNeutral, setShowNeutral] = useState(false)
+  const [showNeutral, setShowNeutral] = useState(true)
 
   useEffect(() => {
     if (!svgRef.current) return
@@ -72,11 +72,11 @@ export function TrustGraph({ nodes, edges, onTickerClick }: Props) {
     const sim = d3.forceSimulation(filteredNodes as any)
       .force('link', d3.forceLink(validEdges.map(e => ({ ...e, source: e.source, target: e.target })))
         .id((d: any) => d.id)
-        .distance((e: any) => e.edge_type === 'theme_ticker' ? 60 : 80)
+        .distance((e: any) => e.edge_type === 'theme_ticker' ? 90 : 80)
         .strength(0.4))
       .force('charge', d3.forceManyBody().strength(-140))
       .force('center', d3.forceCenter(width / 2, height / 2))
-      .force('collision', d3.forceCollide().radius((d: any) => nodeRadius(d) + 6))
+      .force('collision', d3.forceCollide().radius((d: any) => nodeRadius(d) + 20))
 
     // Edges
     const link = g.append('g').selectAll('line')
@@ -130,33 +130,48 @@ export function TrustGraph({ nodes, edges, onTickerClick }: Props) {
       .text(d => d.label)
       .attr('text-anchor', 'middle')
       .attr('dy', d => (d.type === 'theme' ? nodeRadius(d) * 0.8 : nodeRadius(d) + 11))
-      .attr('font-size', d => d.type === 'ticker' ? 11 : d.type === 'theme' ? 9 : 9)
+      .attr('font-size', d => d.type === 'ticker' ? 11 : 9)
+      .attr('font-weight', d => d.type === 'ticker' || d.type === 'theme' ? '600' : '400')
       .attr('fill', d => d.type === 'ticker' ? '#e5e7eb' : d.type === 'theme' ? '#ddd6fe' : '#9ca3af')
+      .attr('stroke', '#111827')
+      .attr('stroke-width', 3)
+      .attr('paint-order', 'stroke')
+      .attr('stroke-linejoin', 'round')
 
     const tooltip = d3.select('body').append('div')
       .attr('class', 'fixed z-50 pointer-events-none bg-gray-800 text-xs text-gray-100 px-2 py-1 rounded shadow-lg opacity-0 transition-opacity max-w-md')
 
     node
       .on('mouseover', (e, d) => {
+        let desc = ''
+        if (d.type === 'account') desc = `Tier ${d.tier} source — credibility ${d.size.toFixed(2)}`
+        else if (d.type === 'ticker') desc = `${d.sentiment} momentum — activity ${(d.size * 100).toFixed(0)}%`
+        else desc = `theme — ${d.sentiment}, activity ${(d.size * 100).toFixed(0)}%`
         tooltip.style('opacity', '1')
-          .html(`<strong>${d.label}</strong><br/>type: ${d.type}${d.type === 'account' ? ` | tier ${d.tier}` : ''}<br/>size: ${d.size.toFixed(3)}`)
+          .html(`<strong>${d.label}</strong><br/>${desc}`)
       })
       .on('mousemove', e => {
         tooltip.style('left', (e.clientX + 12) + 'px').style('top', (e.clientY - 8) + 'px')
       })
       .on('mouseout', () => tooltip.style('opacity', '0'))
 
-    // Edge hover: show source post if available
+    // Edge hover: contextual description per edge type
     link
       .on('mouseover', async (e, d: any) => {
+        const src = d.source.id ?? d.source
+        const tgt = d.target.id ?? d.target
+        let hint = ''
+        if (d.edge_type === 'theme_ticker') hint = '<br/><span class="text-gray-400">inherited via themes.yaml mapping</span>'
+        else if (d.edge_type === 'acct_theme') hint = '<br/><span class="text-gray-400">theme mention in tweet</span>'
+        else if (d.id) hint = '<br/><span class="text-gray-400">loading post…</span>'
         tooltip.style('opacity', '1')
-          .html(`<em>${d.source.id ?? d.source} → ${d.target.id ?? d.target}</em><br/>weight: ${d.weight.toFixed(3)} · ${d.sentiment}<br/><span class="text-gray-400">loading post…</span>`)
-        if (d.id) {
+          .html(`<em>${src} → ${tgt}</em><br/>weight: ${d.weight.toFixed(3)} · ${d.sentiment}${hint}`)
+        if (d.id && d.edge_type !== 'theme_ticker') {
           try {
             const detail = await api.edgeDetail(d.id)
             if (detail.tweet) {
               tooltip.html(
-                `<em>${d.source.id ?? d.source} → ${d.target.id ?? d.target}</em><br/>` +
+                `<em>${src} → ${tgt}</em><br/>` +
                 `weight: ${d.weight.toFixed(3)} · ${d.sentiment}<br/>` +
                 `<span class="text-blue-300">@${detail.tweet.author}</span>: ${detail.tweet.text.slice(0, 180)}`
               )
@@ -186,7 +201,7 @@ export function TrustGraph({ nodes, edges, onTickerClick }: Props) {
 
   return (
     <div className="panel flex flex-col h-full">
-      <div className="flex items-center justify-between mb-1">
+      <div className="flex items-center justify-between mb-0.5">
         <p className="panel-title">Trust Graph</p>
         <div className="flex items-center gap-2 text-[10px] text-gray-500">
           <label className="flex items-center gap-1 cursor-pointer">
@@ -194,11 +209,14 @@ export function TrustGraph({ nodes, edges, onTickerClick }: Props) {
             themes
           </label>
           <label className="flex items-center gap-1 cursor-pointer">
-            <input type="checkbox" checked={showNeutral} onChange={e => setShowNeutral(e.target.checked)} className="accent-gray-500" />
-            neutral edges
+            <input type="checkbox" checked={!showNeutral} onChange={e => setShowNeutral(!e.target.checked)} className="accent-gray-500" />
+            hide neutral
           </label>
         </div>
       </div>
+      <p className="text-[10px] text-gray-600 mb-1">
+        Accounts → themes → tickers. Stronger lines = higher conviction. Solid = direct mention, dashed = via theme.
+      </p>
       <div className="flex-1 min-h-0 relative">
         <svg ref={svgRef} className="w-full h-full" />
         <div className="absolute bottom-2 right-2 flex gap-3 text-xs text-gray-500">
