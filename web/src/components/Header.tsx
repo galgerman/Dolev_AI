@@ -157,7 +157,7 @@ export function Header({ wsStatus, threshold, lastEval, xAuth, collection, llmSt
           ].join(' ')}
         >
           <span className={`w-1.5 h-1.5 rounded-full ${isConnected ? 'bg-green-400' : isActive ? 'bg-yellow-400' : 'bg-gray-500'}`} />
-          {STATE_LABEL[xAuth.state]}
+          {isConnected ? 'Connected' : STATE_LABEL[xAuth.state]}
         </button>
 
         {/* WebSocket status */}

@@ -129,20 +129,30 @@ def ticker_drilldown(ticker: str, db: Session = Depends(_session)):
     latest = history_rows[-1]
     score_history = [(r.window_end, r.score) for r in history_rows]
 
-    # Contributing tweets
+    # Contributing tweets — the ones the LLM actually extracted this ticker from
     one_hour_ago = datetime.utcnow() - timedelta(hours=1)
-    tweet_rows = (
-        db.query(TweetRow)
-        .filter(TweetRow.created_at >= one_hour_ago, TweetRow.text.contains(f"${ticker}"))
+    rows = (
+        db.query(
+            TweetRow,
+            ExtractedTickerRow.sentiment,
+            ExtractedTickerRow.confidence,
+            ExtractedTickerRow.explicit,
+        )
+        .join(ExtractionRow, ExtractionRow.tweet_id == TweetRow.id)
+        .join(ExtractedTickerRow, ExtractedTickerRow.extraction_id == ExtractionRow.id)
+        .filter(
+            ExtractedTickerRow.ticker == ticker,
+            TweetRow.created_at >= one_hour_ago,
+        )
         .order_by(TweetRow.created_at.desc())
         .limit(30)
         .all()
     )
 
-    # Contributing accounts (from tweets)
+    # Contributing accounts (from the same set)
     author_counts: dict[str, int] = {}
-    for t in tweet_rows:
-        author_counts[t.author.lower()] = author_counts.get(t.author.lower(), 0) + 1
+    for tweet, _sent, _conf, _exp in rows:
+        author_counts[tweet.author.lower()] = author_counts.get(tweet.author.lower(), 0) + 1
 
     seed_handles = _load_seed_handles()
     contributing: list[DrilldownAccountContrib] = []
@@ -166,8 +176,9 @@ def ticker_drilldown(ticker: str, db: Session = Depends(_session)):
                 id=t.id, author=t.author, text=t.text,
                 created_at=t.created_at, like_count=t.like_count,
                 retweet_count=t.retweet_count, url=t.url,
+                sentiment=sentiment, confidence=confidence, explicit=explicit,
             )
-            for t in tweet_rows
+            for t, sentiment, confidence, explicit in rows
         ],
     )
 

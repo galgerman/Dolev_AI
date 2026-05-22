@@ -112,10 +112,10 @@ export function TickerDrilldown({ ticker, threshold, onClose }: Props) {
             </div>
           )}
 
-          {/* Recent tweets */}
+          {/* Voices — the tweets the LLM actually extracted this ticker from */}
           {data.recent_tweets.length > 0 && (
             <div>
-              <p className="text-xs text-gray-500 mb-1">Recent tweets</p>
+              <p className="text-xs text-gray-500 mb-1">Voices (last hour)</p>
               <div className="space-y-2">
                 {data.recent_tweets.map(t => (
                   <div key={t.id} className="bg-gray-800 rounded-lg p-2 text-xs">
@@ -123,6 +123,17 @@ export function TickerDrilldown({ ticker, threshold, onClose }: Props) {
                       <span className="text-blue-400">@{t.author}</span>
                       <span className="text-gray-600">{new Date(t.created_at).toLocaleTimeString()}</span>
                     </div>
+                    {t.sentiment && (
+                      <div className="flex items-center gap-2 text-[10px] mb-1">
+                        <span>{SENTIMENT_LABELS[t.sentiment] ?? t.sentiment}</span>
+                        {t.confidence != null && (
+                          <span className="text-gray-500">conf {Math.round(t.confidence * 100)}%</span>
+                        )}
+                        {t.explicit === false && (
+                          <span className="text-gray-600 italic">inferred</span>
+                        )}
+                      </div>
+                    )}
                     <p className="text-gray-300 leading-relaxed">{t.text}</p>
                     <div className="flex gap-3 mt-1 text-gray-600">
                       <span>♥ {t.like_count}</span>

@@ -75,6 +75,9 @@ class DrilldownTweetOut(BaseModel):
     like_count: int
     retweet_count: int
     url: str
+    sentiment: str | None = None       # "positive" | "negative" | "neutral" for the drilldown ticker
+    confidence: float | None = None    # 0.0 – 1.0 LLM confidence
+    explicit: bool | None = None       # ticker mentioned literally vs inferred
 
 
 class DrilldownAccountContrib(BaseModel):

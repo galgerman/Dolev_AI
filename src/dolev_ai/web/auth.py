@@ -21,9 +21,12 @@ _SCRIPTS_DIR = pathlib.Path(__file__).parent.parent.parent.parent / "scripts"
 
 
 def configure(profile_dir: pathlib.Path, event_bus) -> None:
-    global _profile_dir, _event_bus
+    global _profile_dir, _event_bus, _state
     _profile_dir = profile_dir
     _event_bus = event_bus
+    # If cookies already exist from a previous session, start in complete state
+    if is_logged_in():
+        _state = "complete"
 
 
 def is_logged_in() -> bool:

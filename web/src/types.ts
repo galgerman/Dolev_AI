@@ -59,6 +59,9 @@ export interface DrilldownTweet {
   like_count: number
   retweet_count: number
   url: string
+  sentiment?: 'positive' | 'negative' | 'neutral' | null
+  confidence?: number | null
+  explicit?: boolean | null
 }
 
 export interface DrilldownAccountContrib {
