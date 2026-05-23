@@ -537,15 +537,16 @@ class Agent:
         since = datetime.utcnow() - timedelta(minutes=window)
 
         records = self._load_records(since)
-        if not records:
-            logger.info("Evaluate: no extractions in window")
-            return
 
         # Latest TradingView movements per ticker (read fresh each evaluate)
         latest_movements: dict = {}
         if self._tv_enabled:
             with self._session_factory() as session:
                 latest_movements = load_latest_movements(session, max_age_minutes=30)
+
+        if not records and not latest_movements:
+            logger.info("Evaluate: no extractions and no market data in window")
+            return
 
         ticker_scores, theme_scores, edges = aggregate(
             records, window_minutes=window, threshold=self._threshold,
