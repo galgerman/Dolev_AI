@@ -64,6 +64,30 @@ export function Leaderboard({ tickers, pulsing, synthesising, onSelect, selected
             )}
           </div>
           <div className="flex items-center gap-2 text-xs text-gray-500">
+            {t.movement_pct != null && (
+              (() => {
+                const aligned = t.score === 0
+                  ? null
+                  : (t.score > 0) === (t.movement_pct! > 0)
+                const discovery = t.unique_credible_voices === 0
+                const cls = discovery ? 'text-blue-300'
+                  : aligned === true ? 'text-green-400'
+                  : aligned === false ? 'text-orange-400' : 'text-gray-500'
+                const glyph = discovery ? '🔍' : aligned === true ? '✅' : '⚠️'
+                return (
+                  <span
+                    className={clsx('text-[10px] font-mono', cls)}
+                    title={discovery
+                      ? 'Discovery — TradingView mover, no Twitter sentiment yet'
+                      : aligned
+                        ? 'Market action confirms Twitter sentiment'
+                        : 'Market action contradicts Twitter sentiment'}
+                  >
+                    {glyph} {t.movement_pct! >= 0 ? '+' : ''}{t.movement_pct!.toFixed(1)}%
+                  </span>
+                )
+              })()
+            )}
             {t.unique_credible_voices > 0 && <span>{t.unique_credible_voices} voices</span>}
             <span className={clsx(
               pct >= 100 ? (side === 'buy' ? 'text-green-400' : 'text-red-400') :

@@ -9,6 +9,25 @@ export interface TickerScore {
   threshold_progress: number
   direct_score?: number
   cascade_score?: number
+  confirmation_factor?: number
+  movement_pct?: number | null
+}
+
+export interface Mover {
+  ticker: string
+  pct_change: number
+  last_price: number
+  rel_volume: number
+  market_cap?: number
+  rank?: number
+  side: 'gainer' | 'loser'
+  captured_at: string
+}
+
+export interface MoversSnapshot {
+  gainers: Mover[]
+  losers: Mover[]
+  captured_at?: string | null
 }
 
 export interface Signal {
@@ -79,6 +98,10 @@ export interface TickerDrilldown {
   score_history: [string, number][]
   contributing_accounts: DrilldownAccountContrib[]
   recent_tweets: DrilldownTweet[]
+  movement_pct?: number | null
+  movement_rel_volume?: number | null
+  movement_last_price?: number | null
+  confirmation_factor?: number
 }
 
 export interface HealthInfo {
@@ -213,6 +236,7 @@ export type WsEvent =
   | { type: 'theme.activated'; theme: string; score: number; voices: number }
   | { type: 'extraction.backlog'; depth: number; capacity: number; dropped_total: number }
   | { type: 'llm.call'; tweet_id: string; model: string; latency_ms: number; is_finance: boolean; tickers_n: number; themes_n: number; ts: number }
+  | { type: 'movers.updated'; gainers: Mover[]; losers: Mover[]; captured_at: string | null }
 
 export interface XAuthStatus {
   state: 'idle' | 'opening' | 'waiting' | 'complete' | 'error'

@@ -18,6 +18,25 @@ class TickerScoreOut(BaseModel):
     threshold_progress: float
     direct_score: float = 0.0
     cascade_score: float = 0.0
+    confirmation_factor: float = 1.0
+    movement_pct: float | None = None
+
+
+class MoverOut(BaseModel):
+    ticker: str
+    pct_change: float
+    last_price: float
+    rel_volume: float
+    market_cap: float = 0.0
+    rank: int = 0
+    side: Literal["gainer", "loser"]
+    captured_at: datetime
+
+
+class MoversSnapshotOut(BaseModel):
+    gainers: list[MoverOut]
+    losers: list[MoverOut]
+    captured_at: datetime | None = None
 
 
 class SignalOut(BaseModel):
@@ -95,6 +114,10 @@ class TickerDrilldownOut(BaseModel):
     score_history: list[tuple[datetime, float]]   # (timestamp, score) pairs
     contributing_accounts: list[DrilldownAccountContrib]
     recent_tweets: list[DrilldownTweetOut]
+    movement_pct: float | None = None
+    movement_rel_volume: float | None = None
+    movement_last_price: float | None = None
+    confirmation_factor: float = 1.0
 
 
 class SnapshotEvent(BaseModel):

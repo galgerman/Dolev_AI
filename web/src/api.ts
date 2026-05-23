@@ -8,6 +8,7 @@ import type {
   GraphSnapshot,
   HealthInfo,
   LLMStatus,
+  MoversSnapshot,
   PaperPosition,
   Signal,
   SignalApproval,
@@ -34,6 +35,7 @@ async function post<T>(path: string): Promise<T> {
 export const api = {
   health: () => get<HealthInfo>('/health'),
   tickersLive: (limit = 20) => get<TickerScore[]>(`/tickers/live?limit=${limit}`),
+  movers: (topN = 25) => get<MoversSnapshot>(`/movers?top_n=${topN}`),
   tickerDrilldown: (ticker: string) => get<TickerDrilldown>(`/tickers/${ticker}`),
   signalsRecent: (limit = 20) => get<Signal[]>(`/signals/recent?limit=${limit}`),
   graphSnapshot: () => get<GraphSnapshot>('/graph/snapshot'),

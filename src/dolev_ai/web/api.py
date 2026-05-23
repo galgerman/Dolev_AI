@@ -19,6 +19,7 @@ from dolev_ai.db import (
     GraphEdgeRow,
     SignalRow,
     ThemeScoreRow,
+    TickerMovementRow,
     TickerScoreRow,
     TweetRow,
 )
@@ -34,6 +35,8 @@ from dolev_ai.web.schemas import (
     GraphSnapshotOut,
     HealthOut,
     LLMStatusOut,
+    MoverOut,
+    MoversSnapshotOut,
     PaperPositionOut,
     SignalApprovalOut,
     SignalOut,
@@ -106,9 +109,46 @@ def tickers_live(limit: int = 20, db: Session = Depends(_session)):
             window_start=r.window_start, window_end=r.window_end,
             top_tweet_urls=json.loads(r.top_tweet_urls or "[]"),
             threshold_progress=round(abs(r.score) / _threshold, 4) if _threshold > 0 else 0.0,
+            confirmation_factor=getattr(r, "confirmation_factor", 1.0) or 1.0,
+            movement_pct=getattr(r, "movement_pct", None),
         )
         for r in top
     ]
+
+
+@router.get("/movers", response_model=MoversSnapshotOut)
+def movers_snapshot(top_n: int = 25, db: Session = Depends(_session)):
+    """Latest TradingView snapshot — top gainers + losers."""
+    cutoff = datetime.utcnow() - timedelta(minutes=30)
+    rows = (
+        db.query(TickerMovementRow)
+        .filter(TickerMovementRow.captured_at >= cutoff)
+        .order_by(TickerMovementRow.captured_at.desc())
+        .all()
+    )
+    # Keep only the latest row per ticker
+    latest: dict[str, TickerMovementRow] = {}
+    for r in rows:
+        if r.ticker not in latest:
+            latest[r.ticker] = r
+
+    def _to_out(r: TickerMovementRow) -> MoverOut:
+        return MoverOut(
+            ticker=r.ticker, pct_change=r.pct_change, last_price=r.last_price,
+            rel_volume=r.rel_volume, market_cap=r.market_cap, rank=r.rank,
+            side=r.side, captured_at=r.captured_at,
+        )
+
+    gainers = sorted([r for r in latest.values() if r.side == "gainer"],
+                     key=lambda r: -r.pct_change)[:top_n]
+    losers = sorted([r for r in latest.values() if r.side == "loser"],
+                    key=lambda r: r.pct_change)[:top_n]
+    captured = max((r.captured_at for r in latest.values()), default=None)
+    return MoversSnapshotOut(
+        gainers=[_to_out(r) for r in gainers],
+        losers=[_to_out(r) for r in losers],
+        captured_at=captured,
+    )
 
 
 @router.get("/tickers/{ticker}", response_model=TickerDrilldownOut)
@@ -164,6 +204,14 @@ def ticker_drilldown(ticker: str, db: Session = Depends(_session)):
             tweet_count=count,
         ))
 
+    # Latest movement snapshot for the Market row in the drilldown
+    movement = (
+        db.query(TickerMovementRow)
+        .filter(TickerMovementRow.ticker == ticker)
+        .order_by(TickerMovementRow.captured_at.desc())
+        .first()
+    )
+
     return TickerDrilldownOut(
         ticker=ticker,
         current_score=latest.score,
@@ -171,6 +219,10 @@ def ticker_drilldown(ticker: str, db: Session = Depends(_session)):
         unique_credible_voices=latest.unique_credible_voices,
         score_history=score_history,
         contributing_accounts=contributing,
+        movement_pct=movement.pct_change if movement else None,
+        movement_rel_volume=movement.rel_volume if movement else None,
+        movement_last_price=movement.last_price if movement else None,
+        confirmation_factor=getattr(latest, "confirmation_factor", 1.0) or 1.0,
         recent_tweets=[
             DrilldownTweetOut(
                 id=t.id, author=t.author, text=t.text,

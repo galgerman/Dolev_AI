@@ -25,7 +25,7 @@ from functools import lru_cache
 import yaml
 
 from dolev_ai.analysis.credibility import credibility
-from dolev_ai.models import RawTweet, ThemeScore, TickerScore
+from dolev_ai.models import MovementSnapshot, RawTweet, ThemeScore, TickerScore
 
 logger = logging.getLogger(__name__)
 
@@ -75,20 +75,39 @@ class ExtractionRecord:
     themes: list[tuple[str, str, float]]         # (theme, sentiment, confidence)
 
 
+def _confirmation_factor(twitter_score: float, pct_change: float,
+                         confirmation_weight: float, strong_move_pct: float) -> float:
+    """Multiplier in [1 - weight, 1 + weight] that boosts confirmed sentiment
+    and damps contradicting sentiment. 1.0 = no adjustment."""
+    if twitter_score == 0 or pct_change == 0 or strong_move_pct <= 0:
+        return 1.0
+    alignment = 1.0 if (twitter_score > 0) == (pct_change > 0) else -1.0
+    intensity = min(1.0, abs(pct_change) / strong_move_pct)
+    return 1.0 + alignment * confirmation_weight * intensity
+
+
 def aggregate(
     records: list[ExtractionRecord],
     window_minutes: int = 60,
     threshold: float = 5.0,
     now: datetime | None = None,
+    latest_movements: dict[str, MovementSnapshot] | None = None,
+    confirmation_weight: float = 0.5,
+    strong_move_pct: float = 5.0,
+    discovery_weight: float = 0.5,
 ) -> tuple[dict[str, TickerScore], dict[str, ThemeScore], list[GraphEdge]]:
-    """Compute per-ticker + per-theme scores. Returns (ticker_scores, theme_scores, edges)."""
+    """Compute per-ticker + per-theme scores. Returns (ticker_scores, theme_scores, edges).
+
+    If `latest_movements` is supplied, applies a confirmation multiplier to Twitter
+    scores and folds in discovery-only tickers (movers with no Twitter data).
+    """
     if now is None:
         now = datetime.utcnow()
     window_start = now - timedelta(minutes=window_minutes)
     themes_cfg = _themes_config()
 
     in_window = [r for r in records if r.tweet.created_at >= window_start]
-    if not in_window:
+    if not in_window and not (latest_movements or {}):
         return {}, {}, []
 
     # ── Direct ticker scoring ────────────────────────────────────────────
@@ -164,10 +183,20 @@ def aggregate(
             ))
 
     # ── Combine into TickerScore objects ─────────────────────────────────
+    movements = latest_movements or {}
     ticker_scores: dict[str, TickerScore] = {}
     all_tickers = set(direct) | set(cascaded) | set(ticker_voices)
     for t in all_tickers:
-        final = direct.get(t, 0.0) + cascaded.get(t, 0.0)
+        twitter_score = direct.get(t, 0.0) + cascaded.get(t, 0.0)
+        mv = movements.get(t)
+        factor = 1.0
+        movement_pct: float | None = None
+        if mv is not None:
+            movement_pct = mv.pct_change
+            factor = _confirmation_factor(
+                twitter_score, mv.pct_change, confirmation_weight, strong_move_pct,
+            )
+        final = twitter_score * factor
         sorted_urls = [u for _, u in sorted(ticker_top_urls.get(t, []), reverse=True)]
         ticker_scores[t] = TickerScore(
             ticker=t,
@@ -180,6 +209,28 @@ def aggregate(
             threshold_progress=round(abs(final) / threshold, 4) if threshold > 0 else 0.0,
             direct_score=round(direct.get(t, 0.0), 4),
             cascade_score=round(cascaded.get(t, 0.0), 4),
+            confirmation_factor=round(factor, 4),
+            movement_pct=round(movement_pct, 4) if movement_pct is not None else None,
+        )
+
+    # ── Discovery: movers with no Twitter data ──────────────────────────
+    for t, mv in movements.items():
+        if t in ticker_scores:
+            continue
+        disc_score = mv.pct_change * discovery_weight
+        ticker_scores[t] = TickerScore(
+            ticker=t,
+            score=round(disc_score, 4),
+            unique_credible_voices=0,
+            tweet_count=0,
+            window_start=window_start,
+            window_end=now,
+            top_tweet_urls=[],
+            threshold_progress=round(abs(disc_score) / threshold, 4) if threshold > 0 else 0.0,
+            direct_score=0.0,
+            cascade_score=0.0,
+            confirmation_factor=1.0,
+            movement_pct=round(mv.pct_change, 4),
         )
 
     theme_scores: dict[str, ThemeScore] = {}

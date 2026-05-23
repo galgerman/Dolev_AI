@@ -7,6 +7,7 @@ import type {
   GraphNode,
   GraphSnapshot,
   LLMStatus,
+  Mover,
   Signal,
   ThemeScore,
   TickerScore,
@@ -46,6 +47,7 @@ export interface LiveState {
   extractionBacklog: { depth: number; capacity: number; dropped_total: number }
   lastLlmCall: LLMCall | null
   llmCallHistory: LLMCall[]
+  lastMoversEvent: { gainers: Mover[]; losers: Mover[]; captured_at: string | null } | null
 }
 
 const INITIAL: LiveState = {
@@ -74,6 +76,7 @@ const INITIAL: LiveState = {
   extractionBacklog: { depth: 0, capacity: 0, dropped_total: 0 },
   lastLlmCall: null,
   llmCallHistory: [],
+  lastMoversEvent: null,
 }
 
 function upsertNode(nodes: GraphNode[], node: GraphNode) {
@@ -412,6 +415,16 @@ export function useLiveTickers() {
 
         case 'auth.x.status_changed':
           return { ...prev, xAuth: { state: event.state, logged_in: event.logged_in } }
+
+        case 'movers.updated':
+          return {
+            ...prev,
+            lastMoversEvent: {
+              gainers: event.gainers,
+              losers: event.losers,
+              captured_at: event.captured_at,
+            },
+          }
 
         default:
           return prev

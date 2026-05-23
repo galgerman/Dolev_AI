@@ -72,6 +72,39 @@ export function TickerDrilldown({ ticker, threshold, onClose }: Props) {
             <ThresholdProgressBar progress={data.threshold_progress} side={side as 'buy' | 'sell'} />
           </div>
 
+          {/* Market action (TradingView) */}
+          {data.movement_pct != null && (
+            <div className="bg-gray-800/50 rounded p-2 text-xs">
+              <p className="text-[10px] text-gray-500 uppercase tracking-wide mb-1">Market</p>
+              <div className="flex items-center gap-3">
+                <span className={clsx(
+                  'font-mono font-semibold',
+                  data.movement_pct >= 0 ? 'text-green-400' : 'text-red-400'
+                )}>
+                  {data.movement_pct >= 0 ? '+' : ''}{data.movement_pct.toFixed(2)}%
+                </span>
+                {data.movement_last_price != null && (
+                  <span className="text-gray-400">@ ${data.movement_last_price.toFixed(2)}</span>
+                )}
+                {data.movement_rel_volume != null && (
+                  <span className={data.movement_rel_volume >= 2 ? 'text-orange-400' : 'text-gray-500'}>
+                    ×{data.movement_rel_volume.toFixed(1)} vol
+                  </span>
+                )}
+                {data.confirmation_factor != null && Math.abs(data.confirmation_factor - 1.0) > 0.01 && (
+                  <span className={clsx(
+                    'text-[10px] ml-auto px-1.5 py-0.5 rounded',
+                    data.confirmation_factor > 1
+                      ? 'bg-green-900/40 text-green-400'
+                      : 'bg-orange-900/40 text-orange-300'
+                  )}>
+                    {data.confirmation_factor > 1 ? 'boost' : 'cut'} ×{data.confirmation_factor.toFixed(2)}
+                  </span>
+                )}
+              </div>
+            </div>
+          )}
+
           {/* Score timeline */}
           {data.score_history.length > 1 && (
             <div>

@@ -36,6 +36,31 @@ class TickerScore:
     threshold_progress: float = 0.0  # abs(score)/threshold ∈ [0, ∞); ≥1.0 means threshold crossed
     direct_score: float = 0.0        # score from explicit/inferred ticker mentions
     cascade_score: float = 0.0       # score cascaded from theme activations
+    confirmation_factor: float = 1.0  # multiplier applied from TradingView movement (1.0 = no data)
+    movement_pct: float | None = None  # latest TradingView pct change for ticker, or None
+
+
+@dataclass
+class Mover:
+    """A ticker currently in TradingView's top gainers/losers."""
+    ticker: str
+    pct_change: float       # signed: -8.2 = down 8.2%
+    last_price: float
+    rel_volume: float       # vs 10-day average; 1.0 = normal
+    market_cap: float       # USD
+    rank: int               # rank within fetched side (0 = strongest)
+    side: str               # "gainer" | "loser"
+    captured_at: datetime
+
+
+@dataclass
+class MovementSnapshot:
+    """Latest movement state for one ticker — used by the aggregator."""
+    ticker: str
+    pct_change: float
+    last_price: float
+    rel_volume: float
+    captured_at: datetime
 
 
 @dataclass
