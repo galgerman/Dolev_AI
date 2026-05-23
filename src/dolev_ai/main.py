@@ -27,10 +27,12 @@ from dolev_ai.db import (
     init_db,
     last_alert_time,
     load_extractions_since,
+    load_latest_movements,
     log_alert,
     pending_approvals_older_than,
     prune_old_data,
     save_graph_edge,
+    save_movements,
     save_pending_approval,
     save_signal,
     save_theme_score,
@@ -49,6 +51,7 @@ from dolev_ai.live_events import (
 from dolev_ai.llm.factory import build_provider, load_active_config
 from dolev_ai.models import RawTweet, Signal
 from dolev_ai.sources.playwright_source import PlaywrightSource
+from dolev_ai.sources.tradingview import TradingViewSource
 from dolev_ai.strategies.trust_graph import TrustGraphStrategy
 from dolev_ai.synth.synthesizer import Synthesizer
 from dolev_ai.web.server import create_app
@@ -88,16 +91,29 @@ class Agent:
             delay_max=cfg.get("playwright", {}).get("request_delay_max_s", 6.0),
             scroll_count=cfg.get("playwright", {}).get("scroll_count", 3),
         )
+        tv_cfg = cfg.get("tradingview", {}) or {}
+        self._tv_enabled = tv_cfg.get("enabled", True)
+        self._tv_source = TradingViewSource(
+            top_n_per_side=tv_cfg.get("top_n_per_side", 100),
+            min_market_cap=float(tv_cfg.get("min_market_cap_m", 100)) * 1_000_000,
+            min_volume=tv_cfg.get("min_volume", 100_000),
+        )
+        self._tv_confirmation_weight = tv_cfg.get("confirmation_weight", 0.5)
+        self._tv_strong_move_pct = tv_cfg.get("strong_move_pct", 5.0)
+        self._tv_discovery_weight = tv_cfg.get("discovery_weight", 0.5)
+        inv_cfg = tv_cfg.get("investigate", {}) or {}
+        self._inv_enabled = inv_cfg.get("enabled", True)
+        self._inv_threshold = inv_cfg.get("pct_threshold", 5.0)
+        self._inv_max_per_cycle = inv_cfg.get("max_per_cycle", 5)
+        self._inv_dedupe_minutes = inv_cfg.get("dedupe_minutes", 30)
+        self._inv_last: dict[str, datetime] = {}      # ticker → last investigated_at
         self._handles = _load_seed_handles()
         self._alerter = TelegramAlerter(dry_run=dry_run)
         self._bot = TelegramBot(dry_run=dry_run, on_callback=self._on_tg_callback)
         self._threshold = cfg.get("trust_graph", {}).get("score_threshold", 5.0)
         pt_cfg = cfg.get("paper_trading", {})
         self._approval_timeout_minutes = pt_cfg.get("approval_timeout_minutes", 15)
-        self._synthesizer = Synthesizer(
-            model=cfg.get("synth", {}).get("model", "claude-sonnet-4-6"),
-            cache_system_prompt=cfg.get("synth", {}).get("cache_system_prompt", True),
-        )
+        self._synthesizer = Synthesizer()
         tg_cfg = cfg.get("trust_graph", {})
         with self._session_factory() as session:
             self._strategy = TrustGraphStrategy(
@@ -218,6 +234,7 @@ class Agent:
                 return False
 
             await self._source.start()
+            await self._tv_source.start()
             await self._bot.start()
             await self._ensure_extractor()
 
@@ -240,6 +257,14 @@ class Agent:
             )
             # Approval expiry — every minute
             scheduler.add_job(self.expire_approvals, "interval", minutes=1)
+            # TradingView movers — every N minutes (default 5)
+            if self._tv_enabled:
+                tv_cfg = self._cfg.get("tradingview", {}) or {}
+                scheduler.add_job(
+                    self.fetch_movers, "interval",
+                    minutes=tv_cfg.get("poll_cadence_minutes", 5),
+                    next_run_time=datetime.utcnow() + timedelta(seconds=15),
+                )
             # EOD summary — weekdays at 21:00 UTC (16:00 ET)
             eod_cfg = self._cfg.get("eod_summary", {}) or {}
             if eod_cfg.get("enabled", True):
@@ -266,6 +291,7 @@ class Agent:
             scheduler.shutdown(wait=False)
             await self._bot.stop()
             await self._source.stop()
+            await self._tv_source.stop()
             if self._extractor is not None:
                 await self._extractor.stop()
                 self._extractor = None
@@ -303,6 +329,103 @@ class Agent:
                 await self._event_bus.publish({"type": "db.pruned", **counts, "total": total})
         except Exception as e:
             logger.error(f"Prune failed: {e}", exc_info=True)
+
+    async def fetch_movers(self) -> None:
+        """Poll TradingView top movers, persist, publish, and queue investigations."""
+        try:
+            movers = await self._tv_source.fetch_movers()
+        except Exception as e:
+            logger.error(f"fetch_movers failed: {e}", exc_info=True)
+            return
+        if not movers:
+            return
+
+        with self._session_factory() as session:
+            save_movements(session, movers)
+
+        gainers = [m for m in movers if m.side == "gainer"]
+        losers = [m for m in movers if m.side == "loser"]
+        logger.info(
+            f"TradingView: {len(gainers)} gainers (top: ${gainers[0].ticker} {gainers[0].pct_change:+.1f}%) · "
+            f"{len(losers)} losers"
+            if gainers else f"TradingView: {len(movers)} movers"
+        )
+
+        await self._event_bus.publish({
+            "type": "movers.updated",
+            "gainers": [self._mover_to_dict(m) for m in gainers[:25]],
+            "losers": [self._mover_to_dict(m) for m in losers[:25]],
+            "captured_at": (movers[0].captured_at.isoformat() if movers else None),
+        })
+
+        # Queue investigations for big movers we don't already understand
+        if self._inv_enabled:
+            await self._queue_investigations(movers)
+
+    @staticmethod
+    def _mover_to_dict(m) -> dict:
+        return {
+            "ticker": m.ticker,
+            "pct_change": round(m.pct_change, 2),
+            "last_price": round(m.last_price, 2),
+            "rel_volume": round(m.rel_volume, 2),
+            "market_cap": m.market_cap,
+            "rank": m.rank,
+            "side": m.side,
+        }
+
+    async def _queue_investigations(self, movers: list) -> None:
+        """For unexplained big movers, kick off a targeted X search."""
+        now = datetime.utcnow()
+        dedupe_cutoff = now - timedelta(minutes=self._inv_dedupe_minutes)
+        # Drop expired dedupe entries
+        self._inv_last = {t: ts for t, ts in self._inv_last.items() if ts >= dedupe_cutoff}
+
+        # Latest Twitter sentiment per ticker (last 60 min)
+        from dolev_ai.db import TickerScoreRow
+        recent_cutoff = now - timedelta(minutes=60)
+        with self._session_factory() as session:
+            recent_scores = {
+                r.ticker: r.score for r in session.query(TickerScoreRow)
+                .filter(TickerScoreRow.window_end >= recent_cutoff).all()
+            }
+
+        # Sort movers by |pct_change| desc, only consider above threshold
+        candidates = sorted(
+            [m for m in movers if abs(m.pct_change) >= self._inv_threshold],
+            key=lambda m: -abs(m.pct_change),
+        )
+        queued = 0
+        for m in candidates:
+            if queued >= self._inv_max_per_cycle:
+                break
+            if m.ticker in self._inv_last:
+                continue
+            tw_score = recent_scores.get(m.ticker, 0.0)
+            # Investigate if: no twitter data, OR sentiment opposes movement
+            if tw_score == 0 or (tw_score > 0) != (m.pct_change > 0):
+                self._inv_last[m.ticker] = now
+                queued += 1
+                asyncio.create_task(self._investigate_one(m.ticker, m.pct_change))
+        if queued:
+            logger.info(f"Investigating {queued} unexplained mover(s)")
+
+    async def _investigate_one(self, ticker: str, pct_change: float) -> None:
+        try:
+            logger.info(f"Investigating ${ticker} ({pct_change:+.1f}%) — X search")
+            tweets = await self._source.search_query(f"${ticker}", max_tweets=15)
+            if not tweets:
+                logger.info(f"Investigation for ${ticker}: no tweets found")
+                return
+            with self._session_factory() as session:
+                from dolev_ai.db import save_tweets
+                new_count = save_tweets(session, tweets)
+            logger.info(f"Investigation ${ticker}: {new_count} new tweet(s)")
+            if self._extractor is not None and tweets:
+                for tw in tweets[:15]:
+                    await self._extractor.submit(tw)
+        except Exception as e:
+            logger.warning(f"Investigation for ${ticker} failed: {e}")
 
     async def collect(self) -> None:
         """Fetch recent tweets, persist, and submit to LLM extractor."""
@@ -418,8 +541,18 @@ class Agent:
             logger.info("Evaluate: no extractions in window")
             return
 
+        # Latest TradingView movements per ticker (read fresh each evaluate)
+        latest_movements: dict = {}
+        if self._tv_enabled:
+            with self._session_factory() as session:
+                latest_movements = load_latest_movements(session, max_age_minutes=30)
+
         ticker_scores, theme_scores, edges = aggregate(
-            records, window_minutes=window, threshold=self._threshold
+            records, window_minutes=window, threshold=self._threshold,
+            latest_movements=latest_movements,
+            confirmation_weight=self._tv_confirmation_weight,
+            strong_move_pct=self._tv_strong_move_pct,
+            discovery_weight=self._tv_discovery_weight,
         )
         logger.info(
             f"Evaluate: {len(ticker_scores)} tickers + {len(theme_scores)} themes "
@@ -590,7 +723,6 @@ class Agent:
         asyncio.create_task(web_server.serve())
         logger.info("Monitoring dashboard: http://localhost:8000")
 
-        await self.start_worker()
         logger.info("Dolev AI agent started. Press Ctrl+C to stop.")
 
         stop_event = asyncio.Event()

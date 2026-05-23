@@ -5,7 +5,7 @@ import asyncio
 import pathlib
 import random
 import re
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from playwright.async_api import async_playwright, BrowserContext, Page
 
@@ -165,6 +165,27 @@ class PlaywrightSource(TweetSource):
             await page.goto(f"https://x.com/{handle}", wait_until="domcontentloaded", timeout=15000)
             await self._delay()
             return await self._parse_tweets_on_page(page, since)
+        finally:
+            await page.close()
+
+    async def search_query(
+        self, query: str, max_tweets: int = 15, lookback_hours: int = 6
+    ) -> list[RawTweet]:
+        """Run a live X search and return matching tweets (any author).
+
+        Used for ad-hoc investigations — e.g. when TradingView shows a ticker
+        spiking but our Twitter universe is silent on it.
+        """
+        assert self._context, "Call start() first"
+        from urllib.parse import quote
+        since = datetime.utcnow() - timedelta(hours=lookback_hours)
+        page = await self._context.new_page()
+        try:
+            url = f"https://x.com/search?q={quote(query)}&f=live"
+            await page.goto(url, wait_until="domcontentloaded", timeout=15000)
+            await self._delay()
+            tweets = await self._parse_tweets_on_page(page, since)
+            return tweets[:max_tweets]
         finally:
             await page.close()
 

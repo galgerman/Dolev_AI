@@ -3,8 +3,8 @@ import { DBBrowser } from './components/DBBrowser'
 import { ExtractionFeed } from './components/ExtractionFeed'
 import { Header } from './components/Header'
 import { Leaderboard } from './components/Leaderboard'
+import { MarketMovers } from './components/MarketMovers'
 import { PaperPortfolio } from './components/PaperPortfolio'
-import { ScoreChart } from './components/ScoreChart'
 import { SignalFiredToast } from './components/SignalFiredToast'
 import { TickerDrilldown } from './components/TickerDrilldown'
 import { TrustGraph } from './components/TrustGraph'
@@ -74,12 +74,11 @@ export default function App() {
           )}
         </div>
 
-        {/* Col 2 row 2: Score chart */}
+        {/* Col 2 row 2: Market Movers (TradingView) */}
         <div className="min-h-0">
-          <ScoreChart
-            scoreHistory={state.scoreHistory}
-            threshold={state.threshold}
-            signals={state.signals}
+          <MarketMovers
+            onSelect={setSelectedTicker}
+            liveEvent={state.lastMoversEvent}
           />
         </div>
       </div>

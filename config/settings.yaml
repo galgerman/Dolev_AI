@@ -21,9 +21,22 @@ retention:
   edges_keep_hours: 24              # graph_edges older than this
 
 synth:
-  model: claude-sonnet-4-6
-  cache_system_prompt: true
   max_driving_tweets: 10       # top N tweets passed to synthesizer
+
+tradingview:
+  enabled: true
+  poll_cadence_minutes: 5
+  top_n_per_side: 100
+  min_market_cap_m: 100         # USD millions; skip penny stocks
+  min_volume: 100000
+  confirmation_weight: 0.5      # ±50% max boost/cut from price action
+  strong_move_pct: 5.0          # at ±5% the multiplier saturates
+  discovery_weight: 0.5         # score for movers with no Twitter data = pct_change × this
+  investigate:
+    enabled: true
+    pct_threshold: 5.0          # |%| above which an unexplained mover triggers an X search
+    max_per_cycle: 5
+    dedupe_minutes: 30
 
 universe:
   refresh_days: 7              # re-download symbol list every N days

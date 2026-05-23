@@ -52,6 +52,8 @@ class TickerScoreRow(Base):
     window_start = Column(DateTime, nullable=False)
     window_end = Column(DateTime, nullable=False)
     top_tweet_urls = Column(Text, default="[]")  # JSON list
+    confirmation_factor = Column(Float, default=1.0)  # TradingView multiplier applied
+    movement_pct = Column(Float, nullable=True)        # latest pct change at score time
 
 
 class SignalRow(Base):
@@ -162,8 +164,22 @@ class ThemeScoreRow(Base):
     window_end = Column(DateTime, nullable=False)
 
 
+class TickerMovementRow(Base):
+    __tablename__ = "ticker_movements"
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    ticker = Column(String, nullable=False, index=True)
+    pct_change = Column(Float, nullable=False)         # signed: -8.2 = down 8.2%
+    last_price = Column(Float, nullable=False)
+    rel_volume = Column(Float, default=1.0)            # vs 10-day average
+    market_cap = Column(Float, default=0.0)
+    rank = Column(Integer, default=0)                  # rank within fetched side
+    side = Column(String, default="gainer")            # "gainer" | "loser"
+    captured_at = Column(DateTime, default=datetime.utcnow, index=True)
+
+
 Index("ix_extractions_tweet_created", ExtractionRow.tweet_id, ExtractionRow.created_at)
 Index("ix_graph_edges_recent", GraphEdgeRow.created_at, GraphEdgeRow.edge_type)
+Index("ix_movements_ticker_time", TickerMovementRow.ticker, TickerMovementRow.captured_at)
 
 
 def init_db(db_path: pathlib.Path = DB_PATH) -> sessionmaker:
@@ -210,6 +226,8 @@ def save_ticker_score(session: Session, ts: TickerScore) -> None:
         tweet_count=ts.tweet_count,
         window_start=ts.window_start, window_end=ts.window_end,
         top_tweet_urls=json.dumps(ts.top_tweet_urls),
+        confirmation_factor=ts.confirmation_factor,
+        movement_pct=ts.movement_pct,
     ))
     session.commit()
 
@@ -300,6 +318,46 @@ def save_theme_score(
     session.commit()
 
 
+def save_movements(session: Session, movers: list) -> int:
+    """Insert one TickerMovementRow per Mover. Returns count inserted."""
+    from dolev_ai.models import Mover
+    n = 0
+    for m in movers:
+        if not isinstance(m, Mover):
+            continue
+        session.add(TickerMovementRow(
+            ticker=m.ticker, pct_change=m.pct_change, last_price=m.last_price,
+            rel_volume=m.rel_volume, market_cap=m.market_cap, rank=m.rank,
+            side=m.side, captured_at=m.captured_at,
+        ))
+        n += 1
+    session.commit()
+    return n
+
+
+def load_latest_movements(session: Session, max_age_minutes: int = 30) -> dict:
+    """Return {ticker: MovementSnapshot} with the most recent row per ticker."""
+    from datetime import timedelta
+    from dolev_ai.models import MovementSnapshot
+    cutoff = datetime.utcnow() - timedelta(minutes=max_age_minutes)
+    rows = (
+        session.query(TickerMovementRow)
+        .filter(TickerMovementRow.captured_at >= cutoff)
+        .order_by(TickerMovementRow.captured_at.desc())
+        .all()
+    )
+    out: dict[str, MovementSnapshot] = {}
+    for r in rows:
+        if r.ticker in out:
+            continue
+        out[r.ticker] = MovementSnapshot(
+            ticker=r.ticker, pct_change=r.pct_change,
+            last_price=r.last_price, rel_volume=r.rel_volume,
+            captured_at=r.captured_at,
+        )
+    return out
+
+
 def prune_old_data(
     session: Session,
     tweets_keep_days: int = 30,
@@ -326,6 +384,10 @@ def prune_old_data(
 
     counts["graph_edges"] = session.query(GraphEdgeRow).filter(
         GraphEdgeRow.created_at < edges_cutoff
+    ).delete(synchronize_session=False)
+
+    counts["ticker_movements"] = session.query(TickerMovementRow).filter(
+        TickerMovementRow.captured_at < scores_cutoff
     ).delete(synchronize_session=False)
 
     # Find old tweets first so we can cascade-delete their extractions
