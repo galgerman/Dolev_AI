@@ -189,10 +189,44 @@ Index("ix_graph_edges_recent", GraphEdgeRow.created_at, GraphEdgeRow.edge_type)
 Index("ix_movements_ticker_time", TickerMovementRow.ticker, TickerMovementRow.captured_at)
 
 
+def _migrate_add_columns(engine) -> None:
+    """Lightweight schema migration: ALTER TABLE for columns the ORM expects but
+    that aren't yet in the existing SQLite file. Skips columns already present.
+    """
+    from sqlalchemy import inspect, text
+    expected: dict[str, list[tuple[str, str]]] = {
+        "paper_positions": [
+            ("shares", "INTEGER"),
+            ("stop_price", "FLOAT"),
+            ("ibkr_order_id", "INTEGER"),
+            ("ibkr_stop_order_id", "INTEGER"),
+            ("pnl_dollars", "FLOAT"),
+        ],
+        "ticker_movements": [
+            ("gradient", "FLOAT DEFAULT 0.0"),
+            ("gradient_bars", "INTEGER DEFAULT 0"),
+        ],
+        "ticker_scores": [
+            ("confirmation_factor", "FLOAT DEFAULT 1.0"),
+            ("movement_pct", "FLOAT"),
+        ],
+    }
+    inspector = inspect(engine)
+    with engine.begin() as conn:
+        for table, cols in expected.items():
+            if not inspector.has_table(table):
+                continue
+            existing = {c["name"] for c in inspector.get_columns(table)}
+            for name, col_type in cols:
+                if name not in existing:
+                    conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {name} {col_type}"))
+
+
 def init_db(db_path: pathlib.Path = DB_PATH) -> sessionmaker:
     db_path.parent.mkdir(parents=True, exist_ok=True)
     engine = create_engine(f"sqlite:///{db_path}", echo=False)
     Base.metadata.create_all(engine)
+    _migrate_add_columns(engine)
     return sessionmaker(bind=engine)
 
 

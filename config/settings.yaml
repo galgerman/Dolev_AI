@@ -46,6 +46,25 @@ paper_trading:
   approval_timeout_minutes: 15
   price_cache_seconds: 60
 
+momentum:
+  enabled: false                                # master switch — flip true when IBKR is connected
+  poll_cadence_seconds: 30                      # IBKR scanner + gradient refresh
+  eval_cadence_seconds: 15                      # how often GradientStrategy runs
+  # Entry rules
+  entry_threshold_pct_per_min: 0.3              # |gradient| must exceed this
+  sustained_bars: 2                             # reserved for future use
+  min_total_move_pct: 1.5                       # filter out flat noise
+  volume_confirmation_multiplier: 1.5           # reserved for future use
+  # Auto-execute (no approval needed above this gradient)
+  auto_execute_threshold_pct_per_min: 0.5
+  approval_timeout_seconds: 60                  # short timeout — momentum fades fast
+  max_trades_per_day: 10                        # hard cap on auto-executes
+  # End-of-day
+  flatten_minutes_before_close: 5               # close all positions N min before 4pm ET
+  # Twitter behavior in momentum mode
+  disable_timeline_scraping: true               # turn off proactive collect() job
+  investigation_on_signal: true                 # one-off X search per signal for context
+
 broker:
   enabled: false              # flip to true when IBKR account is active
   trading_mode: paper         # paper | live  (paper=7497/4002, live=7496/4001)

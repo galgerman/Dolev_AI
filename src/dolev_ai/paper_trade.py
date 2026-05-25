@@ -17,9 +17,11 @@ from sqlalchemy.orm import Session
 from dolev_ai.db import (
     PaperPositionRow,
     SignalApprovalRow,
+    SignalRow,
     get_approval,
     open_positions,
     position_for_ticker,
+    save_signal,
     update_approval_status,
 )
 from dolev_ai.models import Signal
@@ -67,6 +69,48 @@ def handle_signal(sig: Signal, session: Session) -> PaperAction:
         logger.info(f"Ignoring {sig.side} signal for {sig.ticker}: already holding {pos.side}")
         return PaperAction.noop(sig)
     return PaperAction.propose_close(sig, pos)
+
+
+async def auto_execute(
+    sig: Signal,
+    session: Session,
+    event_bus: "EventBus | None" = None,
+    broker: "IBKRBroker | None" = None,
+    risk: "RiskManager | None" = None,
+) -> tuple[PaperPositionRow | None, str]:
+    """Open or close a position without human approval (high-conviction gradient signals).
+
+    Persists the signal to DB first so we have a signal_id to attach to the position.
+    Returns (position_row, status_text) — status_text is the Telegram-friendly summary.
+    """
+    pos = position_for_ticker(session, sig.ticker)
+    signal_id = save_signal(session, sig)
+
+    if pos is None:
+        # Open new position
+        new_pos = await open_position(signal_id, sig, session, event_bus, broker=broker, risk=risk)
+        if new_pos is None:
+            return None, f"⚠️ Auto-execute failed for ${sig.ticker} (risk/broker blocked)"
+        shares_str = f"{new_pos.shares} sh" if new_pos.shares else ""
+        stop_str = f"stop=${new_pos.stop_price:.2f}" if new_pos.stop_price else ""
+        return new_pos, (
+            f"📈 Auto-{sig.side.upper()} {shares_str} ${sig.ticker} @ ${new_pos.entry_price:.2f}  {stop_str}\n"
+            f"_{sig.rationale}_" if sig.rationale else
+            f"📈 Auto-{sig.side.upper()} {shares_str} ${sig.ticker} @ ${new_pos.entry_price:.2f}  {stop_str}"
+        )
+
+    if pos.side == sig.side:
+        return None, f"⏸ Already holding {pos.side.upper()} ${sig.ticker} — no action"
+
+    # Opposite side → auto-close
+    closed = await close_position(pos.id, signal_id, session, event_bus, broker=broker)
+    if closed is None:
+        return None, f"⚠️ Auto-close failed for ${sig.ticker}"
+    dollar_str = f"  (${closed.pnl_dollars:+,.2f})" if closed.pnl_dollars is not None else ""
+    return closed, (
+        f"📉 Auto-closed ${sig.ticker} @ ${closed.exit_price:.2f}  "
+        f"P&L: {closed.pnl_pct:+.2%}{dollar_str}"
+    )
 
 
 async def open_position(

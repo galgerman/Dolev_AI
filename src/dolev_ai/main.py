@@ -160,6 +160,31 @@ class Agent:
                 cooldown_override_multiplier=tg_cfg.get("cooldown_override_multiplier", 2.0),
                 last_alert_time_fn=lambda t: last_alert_time(session, t),
             )
+
+        # Momentum / gradient strategy
+        mom_cfg = cfg.get("momentum", {}) or {}
+        self._momentum_enabled = mom_cfg.get("enabled", False)
+        self._momentum_disable_twitter = mom_cfg.get("disable_timeline_scraping", True)
+        self._momentum_poll_seconds = mom_cfg.get("poll_cadence_seconds", 30)
+        self._momentum_eval_seconds = mom_cfg.get("eval_cadence_seconds", 15)
+        self._momentum_flatten_before_close = mom_cfg.get("flatten_minutes_before_close", 5)
+        self._momentum_approval_timeout_sec = mom_cfg.get("approval_timeout_seconds", 60)
+        self._gradient_strategy = None
+        if self._momentum_enabled:
+            from dolev_ai.strategies.gradient import GradientStrategy
+            self._gradient_strategy = GradientStrategy(
+                entry_threshold_pct_per_min=mom_cfg.get("entry_threshold_pct_per_min", 0.3),
+                auto_execute_threshold_pct_per_min=mom_cfg.get("auto_execute_threshold_pct_per_min", 0.5),
+                min_total_move_pct=mom_cfg.get("min_total_move_pct", 1.5),
+                max_trades_per_day=mom_cfg.get("max_trades_per_day", 10),
+                held_ticker_fn=self._held_side_for,
+                trades_today_fn=self._trades_opened_today,
+            )
+            logger.info(
+                f"Momentum mode ON — entry≥{mom_cfg.get('entry_threshold_pct_per_min', 0.3)}%/min, "
+                f"auto≥{mom_cfg.get('auto_execute_threshold_pct_per_min', 0.5)}%/min, "
+                f"max {mom_cfg.get('max_trades_per_day', 10)} trades/day"
+            )
         # Track last threshold_progress per ticker to detect near-threshold crossings
         self._last_threshold_progress: dict[str, float] = {}
         self._last_theme_progress: dict[str, float] = {}
@@ -206,7 +231,11 @@ class Agent:
     async def expire_approvals(self) -> None:
         """Mark pending approvals older than timeout as expired."""
         from datetime import timedelta
-        cutoff = datetime.utcnow() - timedelta(minutes=self._approval_timeout_minutes)
+        # Momentum mode uses a short seconds-based timeout; trust-graph uses minutes.
+        if self._momentum_enabled:
+            cutoff = datetime.utcnow() - timedelta(seconds=self._momentum_approval_timeout_sec)
+        else:
+            cutoff = datetime.utcnow() - timedelta(minutes=self._approval_timeout_minutes)
         with self._session_factory() as session:
             stale = pending_approvals_older_than(session, cutoff)
             for approval in stale:
@@ -217,6 +246,138 @@ class Agent:
                 if approval.telegram_message_id:
                     await self._bot.edit_message(approval.telegram_message_id, ack)
                 logger.info(f"Expired approval {approval.id} for signal {approval.signal_id}")
+
+    # ── Momentum helpers ────────────────────────────────────────────────────
+
+    def _held_side_for(self, ticker: str) -> str | None:
+        """Return 'buy'/'sell' if we have an open position in this ticker, else None."""
+        from dolev_ai.db import position_for_ticker
+        with self._session_factory() as session:
+            pos = position_for_ticker(session, ticker)
+            return pos.side if pos else None
+
+    def _trades_opened_today(self) -> int:
+        """Count positions opened since midnight UTC (proxy for trades today)."""
+        from dolev_ai.db import PaperPositionRow
+        today_start = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+        with self._session_factory() as session:
+            return (
+                session.query(PaperPositionRow)
+                .filter(PaperPositionRow.opened_at >= today_start)
+                .count()
+            )
+
+    async def evaluate_gradient(self) -> None:
+        """Run GradientStrategy against the latest TradingView/IBKR movements.
+        Auto-executes strong signals; sends 60s approvals for weaker ones.
+        """
+        if not self._momentum_enabled or self._gradient_strategy is None:
+            return
+        from dolev_ai.utils.market_hours import is_us_market_open
+        if not is_us_market_open():
+            return
+
+        with self._session_factory() as session:
+            movements = load_latest_movements(session, max_age_minutes=5)
+
+        if not movements:
+            return
+
+        gradient_signals = self._gradient_strategy.evaluate(movements)
+        if not gradient_signals:
+            return
+
+        logger.info(f"Gradient strategy: {len(gradient_signals)} signal(s)")
+        for gs in gradient_signals:
+            sig = gs.signal
+            # Synthesize rationale (Ollama)
+            try:
+                from dolev_ai.models import TickerScore
+                stub_ts = TickerScore(
+                    ticker=sig.ticker, score=sig.conviction * (1 if sig.side == "buy" else -1),
+                    unique_credible_voices=0, tweet_count=0,
+                    window_start=sig.generated_at, window_end=sig.generated_at,
+                    movement_pct=None,
+                )
+                enriched = self._synthesizer.synthesize(
+                    sig.ticker, stub_ts, [], themes=[]
+                )
+                # Preserve gradient drivers
+                enriched.key_drivers = sig.key_drivers + (enriched.key_drivers or [])
+            except Exception as e:
+                logger.warning(f"Gradient signal synthesize failed: {e}")
+                enriched = sig
+
+            with self._session_factory() as session:
+                if gs.auto_execute:
+                    pos, msg = await paper_trade.auto_execute(
+                        enriched, session, self._event_bus,
+                        broker=self._broker, risk=self._risk,
+                    )
+                    log_alert(session, enriched)
+                    await self._bot.send_text(msg)
+                else:
+                    signal_id = save_signal(session, enriched)
+                    log_alert(session, enriched)
+                    action = paper_trade.handle_signal(enriched, session)
+                    if action.kind == paper_trade.ActionKind.PROPOSE_OPEN:
+                        approval_id = save_pending_approval(session, "open", signal_id)
+                        msg_id = await self._bot.send_open_prompt(enriched, approval_id)
+                        if msg_id:
+                            set_approval_message_id(session, approval_id, msg_id)
+                    elif action.kind == paper_trade.ActionKind.PROPOSE_CLOSE:
+                        approval_id = save_pending_approval(
+                            session, "close", signal_id,
+                            position_id=action.position.id if action.position else None,
+                        )
+                        msg_id = await self._bot.send_close_prompt(
+                            action.position, enriched, approval_id
+                        )
+                        if msg_id:
+                            set_approval_message_id(session, approval_id, msg_id)
+
+            await self._event_bus.publish({
+                "type": "signal.fired",
+                "ticker": enriched.ticker,
+                "side": enriched.side,
+                "conviction": enriched.conviction,
+                "rationale": enriched.rationale,
+                "key_drivers": enriched.key_drivers,
+                "generated_at": enriched.generated_at.isoformat(),
+                "auto_executed": gs.auto_execute,
+            })
+
+    async def eod_flatten(self) -> None:
+        """Close all open positions a few minutes before market close."""
+        if not self._momentum_enabled:
+            return
+        from dolev_ai.utils.market_hours import minutes_to_close
+        mtc = minutes_to_close()
+        if mtc is None:
+            return  # market closed
+        if mtc > self._momentum_flatten_before_close:
+            return  # not yet — wait for the window
+
+        from dolev_ai.db import open_positions as _open_positions
+        with self._session_factory() as session:
+            positions = _open_positions(session)
+        if not positions:
+            return
+
+        logger.info(f"EOD flatten: closing {len(positions)} positions ({mtc} min to close)")
+        closed_count = 0
+        for pos in positions:
+            with self._session_factory() as session:
+                # Use a synthetic exit_signal_id = -1 to mark EOD-close
+                result = await paper_trade.close_position(
+                    pos.id, -1, session, self._event_bus, broker=self._broker,
+                )
+                if result:
+                    closed_count += 1
+        await self._bot.send_text(
+            f"🌅 EOD flatten: closed {closed_count}/{len(positions)} positions "
+            f"({mtc} min before close)"
+        )
 
     async def send_eod_summary(self) -> None:
         """Send end-of-day summary via Telegram."""
@@ -285,16 +446,23 @@ class Agent:
             await self._ensure_extractor()
 
             scheduler = AsyncIOScheduler()
-            scheduler.add_job(
-                self.collect, "interval",
-                minutes=self._cfg.get("poll_cadence_minutes", 5),
-                next_run_time=datetime.utcnow(),
-            )
-            scheduler.add_job(
-                self.evaluate, "interval",
-                minutes=self._cfg.get("eval_cadence_minutes", 2),
-                next_run_time=datetime.utcnow() + timedelta(seconds=30),
-            )
+
+            # Twitter scrape — skipped in pure-momentum mode
+            twitter_disabled = self._momentum_enabled and self._momentum_disable_twitter
+            if not twitter_disabled:
+                scheduler.add_job(
+                    self.collect, "interval",
+                    minutes=self._cfg.get("poll_cadence_minutes", 5),
+                    next_run_time=datetime.utcnow(),
+                )
+                scheduler.add_job(
+                    self.evaluate, "interval",
+                    minutes=self._cfg.get("eval_cadence_minutes", 2),
+                    next_run_time=datetime.utcnow() + timedelta(seconds=30),
+                )
+            else:
+                logger.info("Twitter timeline scraping disabled (momentum mode)")
+
             ret = self._cfg.get("retention", {}) or {}
             scheduler.add_job(
                 self.prune, "interval",
@@ -303,8 +471,27 @@ class Agent:
             )
             # Approval expiry — every minute
             scheduler.add_job(self.expire_approvals, "interval", minutes=1)
-            # TradingView movers — every N minutes (default 5)
-            if self._tv_enabled:
+
+            # Market data poll — momentum mode uses fast cadence (seconds),
+            # legacy mode uses minutes from tradingview config
+            if self._momentum_enabled:
+                scheduler.add_job(
+                    self.fetch_movers, "interval",
+                    seconds=self._momentum_poll_seconds,
+                    next_run_time=datetime.utcnow() + timedelta(seconds=10),
+                )
+                scheduler.add_job(
+                    self.evaluate_gradient, "interval",
+                    seconds=self._momentum_eval_seconds,
+                    next_run_time=datetime.utcnow() + timedelta(seconds=20),
+                )
+                # EOD flatten — check every minute near close
+                scheduler.add_job(self.eod_flatten, "interval", minutes=1)
+                logger.info(
+                    f"Momentum scheduler: scanner every {self._momentum_poll_seconds}s, "
+                    f"strategy every {self._momentum_eval_seconds}s"
+                )
+            elif self._tv_enabled:
                 tv_cfg = self._cfg.get("tradingview", {}) or {}
                 scheduler.add_job(
                     self.fetch_movers, "interval",
@@ -380,6 +567,11 @@ class Agent:
 
     async def fetch_movers(self) -> None:
         """Poll market movers (IBKR with gradient if connected, else TradingView)."""
+        # In momentum mode, skip when market is closed (no point computing gradient on stale prices)
+        if self._momentum_enabled:
+            from dolev_ai.utils.market_hours import is_us_market_open
+            if not is_us_market_open():
+                return
         try:
             if self._ibkr_market is not None and self._broker and self._broker.connected:
                 movers = await self._ibkr_market.fetch_movers()
