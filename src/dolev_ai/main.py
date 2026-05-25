@@ -120,30 +120,36 @@ class Agent:
         self._broker_enabled = broker_cfg.get("enabled", False)
         self._broker: "IBKRBroker | None" = None
         self._risk: "RiskManager | None" = None
+        self._ibkr_market: "IBKRMarketSource | None" = None
+        from dolev_ai.broker.risk import RiskManager
+        risk_cfg = broker_cfg.get("risk", {}) or {}
+        self._risk = RiskManager(
+            max_position_pct=risk_cfg.get("max_position_pct", 2.0),
+            stop_loss_pct=risk_cfg.get("stop_loss_pct", 2.0),
+            max_open_positions=risk_cfg.get("max_open_positions", 5),
+        )
         if self._broker_enabled:
             from dolev_ai.broker.ibkr import IBKRBroker
-            from dolev_ai.broker.risk import RiskManager
-            risk_cfg = broker_cfg.get("risk", {}) or {}
             self._broker = IBKRBroker(
                 host=broker_cfg.get("host", "127.0.0.1"),
                 port=broker_cfg.get("port", 7497),
                 client_id=broker_cfg.get("client_id", 1),
                 timeout=broker_cfg.get("connect_timeout_s", 10.0),
             )
-            self._risk = RiskManager(
-                max_position_pct=risk_cfg.get("max_position_pct", 2.0),
-                stop_loss_pct=risk_cfg.get("stop_loss_pct", 2.0),
-                max_open_positions=risk_cfg.get("max_open_positions", 5),
-            )
-        else:
-            # Risk manager still active in sim mode — applies sizing rules to yfinance sim
-            from dolev_ai.broker.risk import RiskManager
-            risk_cfg = broker_cfg.get("risk", {}) or {}
-            self._risk = RiskManager(
-                max_position_pct=risk_cfg.get("max_position_pct", 2.0),
-                stop_loss_pct=risk_cfg.get("stop_loss_pct", 2.0),
-                max_open_positions=risk_cfg.get("max_open_positions", 5),
-            )
+            md_cfg = broker_cfg.get("market_data", {}) or {}
+            if md_cfg.get("enabled", False):
+                from dolev_ai.broker.market_data import IBKRMarketSource
+                self._ibkr_market = IBKRMarketSource(
+                    broker=self._broker,
+                    top_n_per_side=md_cfg.get("top_n_per_side", 50),
+                    gradient_top_n=md_cfg.get("gradient_top_n", 20),
+                    gradient_bars=md_cfg.get("gradient_bars", 10),
+                    min_market_cap_m=float(broker_cfg.get("min_market_cap_m",
+                        cfg.get("tradingview", {}).get("min_market_cap_m", 100))),
+                    min_volume=broker_cfg.get("min_volume",
+                        cfg.get("tradingview", {}).get("min_volume", 100_000)),
+                )
+                logger.info("IBKR market data source enabled — will replace TradingView")
 
         tg_cfg = cfg.get("trust_graph", {})
         with self._session_factory() as session:
@@ -373,9 +379,14 @@ class Agent:
             logger.error(f"Prune failed: {e}", exc_info=True)
 
     async def fetch_movers(self) -> None:
-        """Poll TradingView top movers, persist, publish, and queue investigations."""
+        """Poll market movers (IBKR with gradient if connected, else TradingView)."""
         try:
-            movers = await self._tv_source.fetch_movers()
+            if self._ibkr_market is not None and self._broker and self._broker.connected:
+                movers = await self._ibkr_market.fetch_movers()
+                source = "IBKR"
+            else:
+                movers = await self._tv_source.fetch_movers()
+                source = "TradingView"
         except Exception as e:
             logger.error(f"fetch_movers failed: {e}", exc_info=True)
             return
@@ -387,10 +398,12 @@ class Agent:
 
         gainers = [m for m in movers if m.side == "gainer"]
         losers = [m for m in movers if m.side == "loser"]
+        top = gainers[0] if gainers else None
+        grad_str = f"  gradient={top.gradient:+.3f}%/min" if top and getattr(top, "gradient", 0) else ""
         logger.info(
-            f"TradingView: {len(gainers)} gainers (top: ${gainers[0].ticker} {gainers[0].pct_change:+.1f}%) · "
-            f"{len(losers)} losers"
-            if gainers else f"TradingView: {len(movers)} movers"
+            f"{source}: {len(gainers)} gainers "
+            + (f"(top: ${top.ticker} {top.pct_change:+.1f}%{grad_str})" if top else "")
+            + f" · {len(losers)} losers"
         )
 
         await self._event_bus.publish({
@@ -410,10 +423,12 @@ class Agent:
             "ticker": m.ticker,
             "pct_change": round(m.pct_change, 2),
             "last_price": round(m.last_price, 2),
-            "rel_volume": round(m.rel_volume, 2),
-            "market_cap": m.market_cap,
+            "rel_volume": round(getattr(m, "rel_volume", 0.0), 2),
+            "market_cap": getattr(m, "market_cap", 0.0),
             "rank": m.rank,
             "side": m.side,
+            "gradient": round(getattr(m, "gradient", 0.0), 4),
+            "gradient_bars": getattr(m, "gradient_bars", 0),
         }
 
     async def _queue_investigations(self, movers: list) -> None:

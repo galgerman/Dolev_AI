@@ -42,15 +42,17 @@ class TickerScore:
 
 @dataclass
 class Mover:
-    """A ticker currently in TradingView's top gainers/losers."""
+    """A ticker currently in top gainers/losers (TradingView or IBKR scanner)."""
     ticker: str
     pct_change: float       # signed: -8.2 = down 8.2%
     last_price: float
-    rel_volume: float       # vs 10-day average; 1.0 = normal
+    rel_volume: float       # vs 10-day average; 1.0 = normal (TradingView) or 0 (IBKR)
     market_cap: float       # USD
     rank: int               # rank within fetched side (0 = strongest)
     side: str               # "gainer" | "loser"
     captured_at: datetime
+    gradient: float = 0.0   # %/min linear slope over last N 1-min bars (IBKR only)
+    gradient_bars: int = 0  # how many bars gradient was computed over
 
 
 @dataclass
@@ -61,6 +63,7 @@ class MovementSnapshot:
     last_price: float
     rel_volume: float
     captured_at: datetime
+    gradient: float = 0.0   # %/min — 0.0 means not available
 
 
 @dataclass

@@ -179,6 +179,8 @@ class TickerMovementRow(Base):
     market_cap = Column(Float, default=0.0)
     rank = Column(Integer, default=0)                  # rank within fetched side
     side = Column(String, default="gainer")            # "gainer" | "loser"
+    gradient = Column(Float, default=0.0)              # %/min linear slope (IBKR only)
+    gradient_bars = Column(Integer, default=0)         # bars used to compute gradient
     captured_at = Column(DateTime, default=datetime.utcnow, index=True)
 
 
@@ -324,16 +326,20 @@ def save_theme_score(
 
 
 def save_movements(session: Session, movers: list) -> int:
-    """Insert one TickerMovementRow per Mover. Returns count inserted."""
-    from dolev_ai.models import Mover
+    """Insert one TickerMovementRow per Mover or GradientMover. Returns count inserted."""
     n = 0
     for m in movers:
-        if not isinstance(m, Mover):
-            continue
         session.add(TickerMovementRow(
-            ticker=m.ticker, pct_change=m.pct_change, last_price=m.last_price,
-            rel_volume=m.rel_volume, market_cap=m.market_cap, rank=m.rank,
-            side=m.side, captured_at=m.captured_at,
+            ticker=m.ticker,
+            pct_change=m.pct_change,
+            last_price=m.last_price,
+            rel_volume=getattr(m, "rel_volume", 0.0),
+            market_cap=getattr(m, "market_cap", 0.0),
+            rank=m.rank,
+            side=m.side,
+            gradient=getattr(m, "gradient", 0.0),
+            gradient_bars=getattr(m, "gradient_bars", 0),
+            captured_at=m.captured_at,
         ))
         n += 1
     session.commit()
@@ -359,6 +365,7 @@ def load_latest_movements(session: Session, max_age_minutes: int = 30) -> dict:
             ticker=r.ticker, pct_change=r.pct_change,
             last_price=r.last_price, rel_volume=r.rel_volume,
             captured_at=r.captured_at,
+            gradient=r.gradient or 0.0,
         )
     return out
 

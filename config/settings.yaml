@@ -47,15 +47,23 @@ paper_trading:
   price_cache_seconds: 60
 
 broker:
-  enabled: false              # flip to true when IBKR paper account is active
+  enabled: false              # flip to true when IBKR account is active
+  trading_mode: paper         # paper | live  (paper=7497/4002, live=7496/4001)
   host: 127.0.0.1
-  port: 7497                  # TWS paper=7497, IB Gateway paper=4002
+  port: 7497                  # TWS paper=7497, live=7496 | IB Gateway paper=4002, live=4001
   client_id: 1
   connect_timeout_s: 10.0
   risk:
     max_position_pct: 2.0     # max % of portfolio per trade
     stop_loss_pct: 2.0        # stop placed this % away from fill price
     max_open_positions: 5     # hard cap on concurrent open positions
+
+  market_data:
+    enabled: false            # use IBKR as market data source instead of TradingView
+    top_n_per_side: 50        # scanner rows per side (gainers / losers)
+    gradient_top_n: 20        # compute gradient for top N movers by |%change|
+    gradient_bars: 10         # last N 1-min bars used for slope computation
+    poll_cadence_minutes: 5
 
 eod_summary:
   enabled: true
