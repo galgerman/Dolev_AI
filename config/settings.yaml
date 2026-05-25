@@ -46,6 +46,17 @@ paper_trading:
   approval_timeout_minutes: 15
   price_cache_seconds: 60
 
+broker:
+  enabled: false              # flip to true when IBKR paper account is active
+  host: 127.0.0.1
+  port: 7497                  # TWS paper=7497, IB Gateway paper=4002
+  client_id: 1
+  connect_timeout_s: 10.0
+  risk:
+    max_position_pct: 2.0     # max % of portfolio per trade
+    stop_loss_pct: 2.0        # stop placed this % away from fill price
+    max_open_positions: 5     # hard cap on concurrent open positions
+
 eod_summary:
   enabled: true
   cron_hour_utc: 21            # 16:00 ET = 21:00 UTC

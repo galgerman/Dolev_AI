@@ -114,6 +114,37 @@ class Agent:
         pt_cfg = cfg.get("paper_trading", {})
         self._approval_timeout_minutes = pt_cfg.get("approval_timeout_minutes", 15)
         self._synthesizer = Synthesizer()
+
+        # Broker + risk management
+        broker_cfg = cfg.get("broker", {}) or {}
+        self._broker_enabled = broker_cfg.get("enabled", False)
+        self._broker: "IBKRBroker | None" = None
+        self._risk: "RiskManager | None" = None
+        if self._broker_enabled:
+            from dolev_ai.broker.ibkr import IBKRBroker
+            from dolev_ai.broker.risk import RiskManager
+            risk_cfg = broker_cfg.get("risk", {}) or {}
+            self._broker = IBKRBroker(
+                host=broker_cfg.get("host", "127.0.0.1"),
+                port=broker_cfg.get("port", 7497),
+                client_id=broker_cfg.get("client_id", 1),
+                timeout=broker_cfg.get("connect_timeout_s", 10.0),
+            )
+            self._risk = RiskManager(
+                max_position_pct=risk_cfg.get("max_position_pct", 2.0),
+                stop_loss_pct=risk_cfg.get("stop_loss_pct", 2.0),
+                max_open_positions=risk_cfg.get("max_open_positions", 5),
+            )
+        else:
+            # Risk manager still active in sim mode — applies sizing rules to yfinance sim
+            from dolev_ai.broker.risk import RiskManager
+            risk_cfg = broker_cfg.get("risk", {}) or {}
+            self._risk = RiskManager(
+                max_position_pct=risk_cfg.get("max_position_pct", 2.0),
+                stop_loss_pct=risk_cfg.get("stop_loss_pct", 2.0),
+                max_open_positions=risk_cfg.get("max_open_positions", 5),
+            )
+
         tg_cfg = cfg.get("trust_graph", {})
         with self._session_factory() as session:
             self._strategy = TrustGraphStrategy(
@@ -158,7 +189,8 @@ class Agent:
         """Called by TelegramBot when a user taps an inline button."""
         with self._session_factory() as session:
             ack = await paper_trade.handle_approval_callback(
-                approval_id, decision, session, self._event_bus, self._synthesizer
+                approval_id, decision, session, self._event_bus, self._synthesizer,
+                broker=self._broker, risk=self._risk,
             )
             approval = session.get(SignalApprovalRow, approval_id)
             if approval and approval.telegram_message_id:
@@ -173,7 +205,8 @@ class Agent:
             stale = pending_approvals_older_than(session, cutoff)
             for approval in stale:
                 ack = await paper_trade.handle_approval_callback(
-                    approval.id, "expired", session, self._event_bus, self._synthesizer
+                    approval.id, "expired", session, self._event_bus, self._synthesizer,
+                    broker=self._broker, risk=self._risk,
                 )
                 if approval.telegram_message_id:
                     await self._bot.edit_message(approval.telegram_message_id, ack)
@@ -236,6 +269,13 @@ class Agent:
             await self._source.start()
             await self._tv_source.start()
             await self._bot.start()
+
+            if self._broker is not None:
+                connected = await self._broker.connect()
+                if connected:
+                    logger.info("IBKR broker connected — orders will route to paper account")
+                else:
+                    logger.warning("IBKR broker failed to connect — falling back to sim mode")
             await self._ensure_extractor()
 
             scheduler = AsyncIOScheduler()
@@ -292,6 +332,8 @@ class Agent:
             await self._bot.stop()
             await self._source.stop()
             await self._tv_source.stop()
+            if self._broker is not None:
+                await self._broker.disconnect()
             if self._extractor is not None:
                 await self._extractor.stop()
                 self._extractor = None

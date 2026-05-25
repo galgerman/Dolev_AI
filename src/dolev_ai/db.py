@@ -85,11 +85,16 @@ class PaperPositionRow(Base):
     side = Column(String, nullable=False)           # 'buy' | 'sell'
     entry_signal_id = Column(Integer, nullable=False)
     entry_price = Column(Float, nullable=False)
+    shares = Column(Integer, nullable=True)          # position size in shares
+    stop_price = Column(Float, nullable=True)        # stop-loss price
+    ibkr_order_id = Column(Integer, nullable=True)  # IBKR entry order id
+    ibkr_stop_order_id = Column(Integer, nullable=True)  # IBKR stop order id
     opened_at = Column(DateTime, default=datetime.utcnow, index=True)
     exit_signal_id = Column(Integer, nullable=True)
     exit_price = Column(Float, nullable=True)
     closed_at = Column(DateTime, nullable=True)
     pnl_pct = Column(Float, nullable=True)
+    pnl_dollars = Column(Float, nullable=True)       # absolute P&L in USD
     status = Column(String, default="open")         # 'open' | 'closed'
     retrospective = Column(Text, nullable=True)
     retrospective_at = Column(DateTime, nullable=True)

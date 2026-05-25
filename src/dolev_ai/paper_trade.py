@@ -1,4 +1,9 @@
-"""Paper-trading lifecycle: open/close positions on approved signals."""
+"""Paper-trading lifecycle: open/close positions on approved signals.
+
+When broker.enabled=true in settings.yaml, orders are routed through
+IBKRBroker (real fills on paper account). Otherwise falls back to
+yfinance simulation — useful for development and when IBKR is offline.
+"""
 from __future__ import annotations
 
 import logging
@@ -21,6 +26,8 @@ from dolev_ai.models import Signal
 from dolev_ai.prices import get_price_async
 
 if TYPE_CHECKING:
+    from dolev_ai.broker.ibkr import IBKRBroker
+    from dolev_ai.broker.risk import RiskManager
     from dolev_ai.events import EventBus
 
 logger = logging.getLogger(__name__)
@@ -59,7 +66,6 @@ def handle_signal(sig: Signal, session: Session) -> PaperAction:
     if pos.side == sig.side:
         logger.info(f"Ignoring {sig.side} signal for {sig.ticker}: already holding {pos.side}")
         return PaperAction.noop(sig)
-    # Opposite side — propose close
     return PaperAction.propose_close(sig, pos)
 
 
@@ -68,29 +74,83 @@ async def open_position(
     sig: Signal,
     session: Session,
     event_bus: "EventBus | None" = None,
+    broker: "IBKRBroker | None" = None,
+    risk: "RiskManager | None" = None,
 ) -> PaperPositionRow | None:
     price = await get_price_async(sig.ticker)
     if price is None:
         logger.error(f"Cannot open position for {sig.ticker}: price unavailable")
         return None
+
+    shares: int | None = None
+    stop_price: float | None = None
+    ibkr_order_id: int | None = None
+    ibkr_stop_order_id: int | None = None
+
+    if broker and broker.connected and risk:
+        # IBKR path: real order with risk sizing + stop
+        portfolio_val = await broker.portfolio_value() or 0.0
+        open_count = len(open_positions(session))
+        spec = risk.build_order(sig.ticker, sig.side, price, portfolio_val, open_count)
+        if spec is None:
+            logger.warning(f"Risk gate blocked {sig.ticker} — position not opened")
+            return None
+
+        fill = await broker.place_bracket(spec)
+        if fill is None:
+            logger.error(f"IBKR order failed for {sig.ticker}")
+            return None
+
+        price = fill.avg_price
+        shares = fill.shares
+        stop_price = spec.stop_price
+        ibkr_order_id = fill.order_id
+        ibkr_stop_order_id = fill.stop_order_id
+        logger.info(
+            f"IBKR fill: {sig.side.upper()} {shares} {sig.ticker} @ ${price:.2f}  "
+            f"stop=${stop_price:.2f}"
+        )
+    elif risk:
+        # Simulation path with risk sizing (no real broker)
+        portfolio_val = 100_000.0  # IBKR paper default
+        open_count = len(open_positions(session))
+        spec = risk.build_order(sig.ticker, sig.side, price, portfolio_val, open_count)
+        if spec is None:
+            return None
+        shares = spec.shares
+        stop_price = spec.stop_price
+
     pos = PaperPositionRow(
         ticker=sig.ticker,
         side=sig.side,
         entry_signal_id=signal_id,
         entry_price=price,
+        shares=shares,
+        stop_price=stop_price,
+        ibkr_order_id=ibkr_order_id,
+        ibkr_stop_order_id=ibkr_stop_order_id,
         opened_at=datetime.utcnow(),
         status="open",
     )
     session.add(pos)
     session.commit()
-    logger.info(f"Opened paper {sig.side} {sig.ticker} @ ${price:.2f}")
+
+    mode = "IBKR" if ibkr_order_id else "sim"
+    logger.info(
+        f"Opened [{mode}] {sig.side.upper()} {sig.ticker} @ ${price:.2f}"
+        + (f"  {shares} shares  stop=${stop_price:.2f}" if shares else "")
+    )
+
     if event_bus:
         await event_bus.publish({
             "type": "position.opened",
             "ticker": sig.ticker,
             "side": sig.side,
             "entry_price": price,
+            "shares": shares,
+            "stop_price": stop_price,
             "position_id": pos.id,
+            "mode": mode,
         })
     return pos
 
@@ -101,28 +161,47 @@ async def close_position(
     session: Session,
     event_bus: "EventBus | None" = None,
     synthesizer=None,
+    broker: "IBKRBroker | None" = None,
 ) -> PaperPositionRow | None:
     pos = session.get(PaperPositionRow, position_id)
     if pos is None or pos.status != "open":
         logger.warning(f"Position {position_id} not found or already closed")
         return None
 
-    price = await get_price_async(pos.ticker)
-    if price is None:
-        logger.error(f"Cannot close position {position_id}: price unavailable")
-        return None
+    if broker and broker.connected and pos.ibkr_order_id is not None:
+        # IBKR path: cancel stop, market-close
+        exit_price = await broker.close_position(
+            pos.ticker, pos.side,
+            pos.shares or 1,
+            pos.ibkr_stop_order_id,
+        )
+        if exit_price is None:
+            logger.error(f"IBKR close failed for {pos.ticker}")
+            return None
+        price = exit_price
+    else:
+        price = await get_price_async(pos.ticker)
+        if price is None:
+            logger.error(f"Cannot close position {position_id}: price unavailable")
+            return None
 
-    pnl = compute_pnl_pct(pos.entry_price, price, pos.side)
+    pnl_pct = compute_pnl_pct(pos.entry_price, price, pos.side)
+    shares_count = pos.shares if isinstance(pos.shares, int) else 0
+    pnl_dollars = (price - pos.entry_price) * shares_count * (1 if pos.side == "buy" else -1)
+
     pos.exit_signal_id = exit_signal_id
     pos.exit_price = price
     pos.closed_at = datetime.utcnow()
-    pos.pnl_pct = pnl
+    pos.pnl_pct = pnl_pct
+    pos.pnl_dollars = round(pnl_dollars, 2)
     pos.status = "closed"
     session.commit()
 
+    shares_int = pos.shares if isinstance(pos.shares, int) else None
     logger.info(
-        f"Closed paper {pos.side} {pos.ticker} @ ${price:.2f} "
-        f"(entry ${pos.entry_price:.2f}, P&L {pnl:+.2%})"
+        f"Closed {pos.side.upper()} {pos.ticker} @ ${price:.2f} "
+        f"(entry ${pos.entry_price:.2f}  P&L {pnl_pct:+.2%}"
+        + (f"  ${pnl_dollars:+,.2f}" if shares_int else "") + ")"
     )
 
     if synthesizer:
@@ -141,7 +220,9 @@ async def close_position(
             "side": pos.side,
             "entry_price": pos.entry_price,
             "exit_price": price,
-            "pnl_pct": pnl,
+            "pnl_pct": pnl_pct,
+            "pnl_dollars": pnl_dollars,
+            "shares": pos.shares,
             "position_id": pos.id,
             "retrospective": pos.retrospective,
         })
@@ -155,10 +236,12 @@ def compute_pnl_pct(entry: float, exit_price: float, side: str) -> float:
 
 async def handle_approval_callback(
     approval_id: int,
-    decision: str,           # 'approved' | 'rejected' | 'expired'
+    decision: str,
     session: Session,
     event_bus: "EventBus | None" = None,
     synthesizer=None,
+    broker: "IBKRBroker | None" = None,
+    risk: "RiskManager | None" = None,
 ) -> str:
     """Process a user decision from Telegram or dashboard. Returns ack message text."""
     approval = get_approval(session, approval_id)
@@ -174,7 +257,6 @@ async def handle_approval_callback(
         return f"⏸ {verb} — no position opened."
 
     if approval.kind == "open":
-        # Re-fetch the signal
         from dolev_ai.db import SignalRow
         sig_row = session.get(SignalRow, approval.signal_id)
         if sig_row is None:
@@ -188,23 +270,29 @@ async def handle_approval_callback(
             key_drivers=[],
             generated_at=sig_row.generated_at,
         )
-        pos = await open_position(approval.signal_id, sig, session, event_bus)
+        pos = await open_position(
+            approval.signal_id, sig, session, event_bus, broker=broker, risk=risk
+        )
         if pos is None:
-            return "Could not fetch price — position not opened."
-        return f"✅ Opened {sig.side.upper()} ${sig.ticker} @ ${pos.entry_price:.2f}"
+            return "Could not open position — check logs."
+        shares_str = f"  {pos.shares} shares" if pos.shares else ""
+        stop_str = f"  stop=${pos.stop_price:.2f}" if pos.stop_price else ""
+        return f"✅ Opened {sig.side.upper()} ${sig.ticker} @ ${pos.entry_price:.2f}{shares_str}{stop_str}"
 
     elif approval.kind == "close":
         if approval.position_id is None:
             return "No position linked to this approval."
         pos = await close_position(
-            approval.position_id, approval.signal_id, session, event_bus, synthesizer
+            approval.position_id, approval.signal_id, session, event_bus,
+            synthesizer, broker=broker,
         )
         if pos is None:
             return "Could not close position."
+        dollar_str = f"  (${pos.pnl_dollars:+,.2f})" if pos.pnl_dollars is not None else ""
         retro_hint = f"\n_{pos.retrospective}_" if pos.retrospective else ""
         return (
             f"✅ Closed ${pos.ticker} @ ${pos.exit_price:.2f}  "
-            f"P&L: {pos.pnl_pct:+.2%}{retro_hint}"
+            f"P&L: {pos.pnl_pct:+.2%}{dollar_str}{retro_hint}"
         )
 
     return "Unknown approval kind."
