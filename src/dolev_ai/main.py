@@ -128,6 +128,10 @@ class Agent:
             stop_loss_pct=risk_cfg.get("stop_loss_pct", 2.0),
             max_open_positions=risk_cfg.get("max_open_positions", 5),
         )
+        # Shared reference data cache (per-cycle gradients + sector ETFs + premarket H/L)
+        from dolev_ai.strategies.reference_data import ReferenceCache
+        self._ref_cache = ReferenceCache()
+
         if self._broker_enabled:
             from dolev_ai.broker.ibkr import IBKRBroker
             self._broker = IBKRBroker(
@@ -141,13 +145,16 @@ class Agent:
                 from dolev_ai.broker.market_data import IBKRMarketSource
                 self._ibkr_market = IBKRMarketSource(
                     broker=self._broker,
+                    reference_cache=self._ref_cache,
                     top_n_per_side=md_cfg.get("top_n_per_side", 50),
                     gradient_top_n=md_cfg.get("gradient_top_n", 20),
                     gradient_bars=md_cfg.get("gradient_bars", 10),
+                    feature_bars=md_cfg.get("feature_bars", 12),
                     min_market_cap_m=float(broker_cfg.get("min_market_cap_m",
                         cfg.get("tradingview", {}).get("min_market_cap_m", 100))),
                     min_volume=broker_cfg.get("min_volume",
                         cfg.get("tradingview", {}).get("min_volume", 100_000)),
+                    snapshot_enabled=md_cfg.get("snapshot_enabled", True),
                 )
                 logger.info("IBKR market data source enabled — will replace TradingView")
 
@@ -161,28 +168,70 @@ class Agent:
                 last_alert_time_fn=lambda t: last_alert_time(session, t),
             )
 
+        # Pipeline mode (observe | paper | live) — research-grade switch
+        pipeline_cfg = cfg.get("pipeline", {}) or {}
+        self._pipeline_mode = pipeline_cfg.get("mode", "paper")
+        self._auto_execute_conf = pipeline_cfg.get("auto_execute_confidence_min", 70.0)
+        self._approval_conf = pipeline_cfg.get("approval_confidence_min", 50.0)
+
+        # Top-level Twitter kill switch
+        twitter_cfg = cfg.get("twitter", {}) or {}
+        self._twitter_enabled = twitter_cfg.get("enabled", False)
+
+        # Observer + position tracker config
+        observer_cfg = cfg.get("observer", {}) or {}
+        self._observer_horizons = observer_cfg.get(
+            "horizons_seconds", [30, 60, 180, 300, 900, 1800]
+        )
+        self._observer_tick_seconds = observer_cfg.get("tick_seconds", 5.0)
+        tracker_cfg = cfg.get("position_tracker", {}) or {}
+        self._tracker_poll_seconds = tracker_cfg.get("poll_seconds", 5.0)
+
+        # Confidence scorer (weights come from config; defaults baked in)
+        feat_cfg = cfg.get("features", {}) or {}
+        weight_overrides = feat_cfg.get("confidence_weights")
+        from dolev_ai.strategies.confidence import ConfidenceScorer
+        self._scorer = ConfidenceScorer(weights=weight_overrides)
+
+        # Forward-return observer + MFE/MAE tracker (lazy-started in start_worker)
+        from dolev_ai.observer import ForwardReturnObserver
+        from dolev_ai.position_tracker import PositionTracker
+        from dolev_ai.prices import get_price_async
+        self._observer: ForwardReturnObserver | None = ForwardReturnObserver(
+            self._session_factory, get_price_async, tick_seconds=self._observer_tick_seconds,
+        )
+        self._tracker: PositionTracker | None = PositionTracker(
+            self._session_factory, get_price_async, poll_seconds=self._tracker_poll_seconds,
+        )
+
         # Momentum / gradient strategy
         mom_cfg = cfg.get("momentum", {}) or {}
         self._momentum_enabled = mom_cfg.get("enabled", False)
-        self._momentum_disable_twitter = mom_cfg.get("disable_timeline_scraping", True)
+        # Twitter is gated at the top level now; momentum still honours its own legacy switch
+        self._momentum_disable_twitter = (
+            not self._twitter_enabled
+            or mom_cfg.get("disable_timeline_scraping", True)
+        )
         self._momentum_poll_seconds = mom_cfg.get("poll_cadence_seconds", 30)
         self._momentum_eval_seconds = mom_cfg.get("eval_cadence_seconds", 15)
         self._momentum_flatten_before_close = mom_cfg.get("flatten_minutes_before_close", 5)
         self._momentum_approval_timeout_sec = mom_cfg.get("approval_timeout_seconds", 60)
         self._gradient_strategy = None
         if self._momentum_enabled:
-            from dolev_ai.strategies.gradient import GradientStrategy
-            self._gradient_strategy = GradientStrategy(
+            from dolev_ai.strategies.gradient import MomentumStrategy
+            self._gradient_strategy = MomentumStrategy(
+                scorer=self._scorer,
+                auto_execute_confidence=self._auto_execute_conf,
+                approval_confidence=self._approval_conf,
                 entry_threshold_pct_per_min=mom_cfg.get("entry_threshold_pct_per_min", 0.3),
-                auto_execute_threshold_pct_per_min=mom_cfg.get("auto_execute_threshold_pct_per_min", 0.5),
                 min_total_move_pct=mom_cfg.get("min_total_move_pct", 1.5),
                 max_trades_per_day=mom_cfg.get("max_trades_per_day", 10),
                 held_ticker_fn=self._held_side_for,
                 trades_today_fn=self._trades_opened_today,
             )
             logger.info(
-                f"Momentum mode ON — entry≥{mom_cfg.get('entry_threshold_pct_per_min', 0.3)}%/min, "
-                f"auto≥{mom_cfg.get('auto_execute_threshold_pct_per_min', 0.5)}%/min, "
+                f"Momentum mode ON [pipeline={self._pipeline_mode}] — "
+                f"auto≥{self._auto_execute_conf}/100, approval≥{self._approval_conf}/100, "
                 f"max {mom_cfg.get('max_trades_per_day', 10)} trades/day"
             )
         # Track last threshold_progress per ticker to detect near-threshold crossings
@@ -268,8 +317,12 @@ class Agent:
             )
 
     async def evaluate_gradient(self) -> None:
-        """Run GradientStrategy against the latest TradingView/IBKR movements.
-        Auto-executes strong signals; sends 60s approvals for weaker ones.
+        """Run MomentumStrategy against the latest movements.
+
+        Pipeline mode:
+          observe — record signal observation, NO orders, NO Telegram per-signal
+          paper   — record observation + auto-execute through paper broker + rich Telegram journal
+          live    — same as paper but broker.trading_mode='live' (config-gated)
         """
         if not self._momentum_enabled or self._gradient_strategy is None:
             return
@@ -283,46 +336,98 @@ class Agent:
         if not movements:
             return
 
-        gradient_signals = self._gradient_strategy.evaluate(movements)
-        if not gradient_signals:
+        signals = self._gradient_strategy.evaluate(movements)
+        if not signals:
             return
 
-        logger.info(f"Gradient strategy: {len(gradient_signals)} signal(s)")
-        for gs in gradient_signals:
-            sig = gs.signal
-            # Synthesize rationale (Ollama)
-            try:
-                from dolev_ai.models import TickerScore
-                stub_ts = TickerScore(
-                    ticker=sig.ticker, score=sig.conviction * (1 if sig.side == "buy" else -1),
-                    unique_credible_voices=0, tweet_count=0,
-                    window_start=sig.generated_at, window_end=sig.generated_at,
-                    movement_pct=None,
-                )
-                enriched = self._synthesizer.synthesize(
-                    sig.ticker, stub_ts, [], themes=[]
-                )
-                # Preserve gradient drivers
-                enriched.key_drivers = sig.key_drivers + (enriched.key_drivers or [])
-            except Exception as e:
-                logger.warning(f"Gradient signal synthesize failed: {e}")
-                enriched = sig
+        logger.info(
+            f"Momentum strategy [{self._pipeline_mode}]: {len(signals)} signal(s)"
+        )
 
-            with self._session_factory() as session:
-                if gs.auto_execute:
-                    pos, msg = await paper_trade.auto_execute(
-                        enriched, session, self._event_bus,
-                        broker=self._broker, risk=self._risk,
+        from dolev_ai.db import save_signal_observation as _save_obs
+        from dataclasses import asdict as _asdict
+
+        for ms in signals:
+            sig = ms.signal
+            mv = movements.get(sig.ticker)
+            entry_price = mv.last_price if mv is not None else 0.0
+            sector_etf = mv.sector_etf if mv is not None else None
+
+            # Always record a signal observation — fuels research reports
+            try:
+                with self._session_factory() as session:
+                    _save_obs(
+                        session,
+                        ticker=sig.ticker,
+                        side=sig.side,
+                        entry_price=entry_price,
+                        confidence=ms.confidence,
+                        components=ms.components,
+                        features=_asdict(ms.features),
+                        horizons_seconds=self._observer_horizons,
+                        sector_etf=sector_etf,
+                        generated_at=sig.generated_at,
                     )
-                    log_alert(session, enriched)
-                    await self._bot.send_text(msg)
+            except Exception as e:
+                logger.warning(f"Failed to record signal observation: {e}")
+
+            await self._event_bus.publish({
+                "type": "signal.fired",
+                "ticker": sig.ticker,
+                "side": sig.side,
+                "confidence": ms.confidence,
+                "conviction": sig.conviction,
+                "key_drivers": sig.key_drivers,
+                "components": ms.components,
+                "generated_at": sig.generated_at.isoformat(),
+                "pipeline_mode": self._pipeline_mode,
+                "auto_executed": ms.auto_execute and self._pipeline_mode != "observe",
+            })
+
+            # Observe mode: stop here. No orders, no Telegram blast.
+            if self._pipeline_mode == "observe":
+                continue
+
+            # Paper / live: route through the broker
+            with self._session_factory() as session:
+                if ms.auto_execute:
+                    pos, _ = await paper_trade.auto_execute(
+                        sig, session, self._event_bus,
+                        broker=self._broker, risk=self._risk,
+                        features=ms.features, confidence=ms.confidence,
+                        components=ms.components, tracker=self._tracker,
+                    )
+                    log_alert(session, sig)
+                    if pos is not None and pos.status == "open":
+                        msg_id = await self._bot.send_trade_open(
+                            pos,
+                            features=ms.features,
+                            components=ms.components,
+                            latency_ms=pos.fill_latency_ms,
+                            slippage_bps=pos.slippage_bps,
+                            confidence=ms.confidence,
+                            mode=self._pipeline_mode,
+                        )
+                        if msg_id is not None:
+                            pos.telegram_message_id = msg_id
+                            session.commit()
+                    elif pos is not None and pos.status == "closed":
+                        # auto_execute closed an opposite-side position
+                        hold_min = None
+                        if pos.opened_at and pos.closed_at:
+                            hold_min = (pos.closed_at - pos.opened_at).total_seconds() / 60.0
+                        await self._bot.send_trade_close(
+                            pos, mfe_pct=pos.mfe_pct, mae_pct=pos.mae_pct,
+                            hold_minutes=hold_min, exit_reason=pos.exit_reason,
+                            edit_message_id=pos.telegram_message_id,
+                        )
                 else:
-                    signal_id = save_signal(session, enriched)
-                    log_alert(session, enriched)
-                    action = paper_trade.handle_signal(enriched, session)
+                    signal_id = save_signal(session, sig)
+                    log_alert(session, sig)
+                    action = paper_trade.handle_signal(sig, session)
                     if action.kind == paper_trade.ActionKind.PROPOSE_OPEN:
                         approval_id = save_pending_approval(session, "open", signal_id)
-                        msg_id = await self._bot.send_open_prompt(enriched, approval_id)
+                        msg_id = await self._bot.send_open_prompt(sig, approval_id)
                         if msg_id:
                             set_approval_message_id(session, approval_id, msg_id)
                     elif action.kind == paper_trade.ActionKind.PROPOSE_CLOSE:
@@ -331,21 +436,10 @@ class Agent:
                             position_id=action.position.id if action.position else None,
                         )
                         msg_id = await self._bot.send_close_prompt(
-                            action.position, enriched, approval_id
+                            action.position, sig, approval_id
                         )
                         if msg_id:
                             set_approval_message_id(session, approval_id, msg_id)
-
-            await self._event_bus.publish({
-                "type": "signal.fired",
-                "ticker": enriched.ticker,
-                "side": enriched.side,
-                "conviction": enriched.conviction,
-                "rationale": enriched.rationale,
-                "key_drivers": enriched.key_drivers,
-                "generated_at": enriched.generated_at.isoformat(),
-                "auto_executed": gs.auto_execute,
-            })
 
     async def eod_flatten(self) -> None:
         """Close all open positions a few minutes before market close."""
@@ -371,9 +465,23 @@ class Agent:
                 # Use a synthetic exit_signal_id = -1 to mark EOD-close
                 result = await paper_trade.close_position(
                     pos.id, -1, session, self._event_bus, broker=self._broker,
+                    exit_reason="eod_flatten", tracker=self._tracker,
                 )
                 if result:
                     closed_count += 1
+                    # Send rich close journal — edit original entry message if we have it
+                    hold_min = None
+                    if result.opened_at and result.closed_at:
+                        hold_min = (result.closed_at - result.opened_at).total_seconds() / 60.0
+                    try:
+                        await self._bot.send_trade_close(
+                            result,
+                            mfe_pct=result.mfe_pct, mae_pct=result.mae_pct,
+                            hold_minutes=hold_min, exit_reason="eod_flatten",
+                            edit_message_id=result.telegram_message_id,
+                        )
+                    except Exception as e:
+                        logger.warning(f"send_trade_close failed for {result.ticker}: {e}")
         await self._bot.send_text(
             f"🌅 EOD flatten: closed {closed_count}/{len(positions)} positions "
             f"({mtc} min before close)"
@@ -510,7 +618,16 @@ class Agent:
             scheduler.start()
             self._scheduler = scheduler
             self._worker_started_at = datetime.utcnow()
-            logger.info("Dolev AI scraper agent started.")
+
+            # Forward-return observer always runs in momentum mode — it powers
+            # research reports even while paper-trading.
+            if self._momentum_enabled and self._observer is not None:
+                self._observer.start()
+
+            logger.info(
+                f"Dolev AI agent started [pipeline={self._pipeline_mode}, "
+                f"twitter={'on' if self._twitter_enabled else 'off'}]."
+            )
             return True
 
     async def stop_worker(self) -> bool:
@@ -522,6 +639,10 @@ class Agent:
             self._scheduler = None
             self._worker_started_at = None
             scheduler.shutdown(wait=False)
+            if self._observer is not None:
+                await self._observer.stop()
+            if self._tracker is not None:
+                await self._tracker.stop_all()
             await self._bot.stop()
             await self._source.stop()
             await self._tv_source.stop()

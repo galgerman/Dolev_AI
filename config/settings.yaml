@@ -46,24 +46,56 @@ paper_trading:
   approval_timeout_minutes: 15
   price_cache_seconds: 60
 
+# ── Research-grade pipeline switch ───────────────────────────────────────────
+# observe — full feature pipeline runs, signals + forward returns are recorded,
+#           NO orders are placed, NO per-signal Telegram blast (only digests).
+# paper   — auto-execute paper trades on confidence-qualifying signals,
+#           rich Telegram journal per trade. Default once IBKR paper is active.
+# live    — same as paper but with broker.trading_mode=live and tiny size.
+pipeline:
+  mode: paper
+  auto_execute_confidence_min: 70.0
+  approval_confidence_min: 50.0
+
+# Confidence-scoring weights (initial guesses — recalibrate from observe data)
+features:
+  confidence_weights:
+    gradient: 25.0
+    acceleration: 15.0
+    roc_3m: 10.0
+    rel_strength_spy: 10.0
+    rel_strength_sector: 10.0
+    vwap_above: 10.0
+    broke_pmh: 10.0
+    rel_volume: 5.0
+    extension_penalty: -5.0
+    spread_penalty: -5.0
+
+# Forward-return observer (records realised returns after each signal)
+observer:
+  horizons_seconds: [30, 60, 180, 300, 900, 1800]   # 30s, 1m, 3m, 5m, 15m, 30m
+  tick_seconds: 5.0
+
+# MFE/MAE tracker (polls live price per open position)
+position_tracker:
+  poll_seconds: 5.0
+
+# Top-level Twitter kill switch (dormant by default in momentum mode).
+# Code remains in the repo for optional re-enable.
+twitter:
+  enabled: false
+
 momentum:
   enabled: false                                # master switch — flip true when IBKR is connected
-  poll_cadence_seconds: 30                      # IBKR scanner + gradient refresh
-  eval_cadence_seconds: 15                      # how often GradientStrategy runs
-  # Entry rules
-  entry_threshold_pct_per_min: 0.3              # |gradient| must exceed this
-  sustained_bars: 2                             # reserved for future use
+  poll_cadence_seconds: 30                      # IBKR scanner + feature refresh
+  eval_cadence_seconds: 15                      # how often MomentumStrategy runs
+  # Entry rules (pre-scoring filters)
+  entry_threshold_pct_per_min: 0.3              # |gradient| floor before features get scored
   min_total_move_pct: 1.5                       # filter out flat noise
-  volume_confirmation_multiplier: 1.5           # reserved for future use
-  # Auto-execute (no approval needed above this gradient)
-  auto_execute_threshold_pct_per_min: 0.5
   approval_timeout_seconds: 60                  # short timeout — momentum fades fast
   max_trades_per_day: 10                        # hard cap on auto-executes
   # End-of-day
   flatten_minutes_before_close: 5               # close all positions N min before 4pm ET
-  # Twitter behavior in momentum mode
-  disable_timeline_scraping: true               # turn off proactive collect() job
-  investigation_on_signal: true                 # one-off X search per signal for context
 
 broker:
   enabled: false              # flip to true when IBKR account is active
@@ -80,8 +112,10 @@ broker:
   market_data:
     enabled: false            # use IBKR as market data source instead of TradingView
     top_n_per_side: 50        # scanner rows per side (gainers / losers)
-    gradient_top_n: 20        # compute gradient for top N movers by |%change|
+    gradient_top_n: 20        # compute features for top N movers by |%change|
     gradient_bars: 10         # last N 1-min bars used for slope computation
+    feature_bars: 12          # 1-min OHLCV window used by the feature engine
+    snapshot_enabled: true    # request bid/ask snapshot per ticker each cycle
     poll_cadence_minutes: 5
 
 eod_summary:

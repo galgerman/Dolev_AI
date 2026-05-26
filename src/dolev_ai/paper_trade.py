@@ -6,11 +6,13 @@ yfinance simulation — useful for development and when IBKR is offline.
 """
 from __future__ import annotations
 
+import json
 import logging
-from dataclasses import dataclass
+import time
+from dataclasses import asdict, dataclass, is_dataclass
 from datetime import datetime
 from enum import Enum
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from sqlalchemy.orm import Session
 
@@ -31,6 +33,8 @@ if TYPE_CHECKING:
     from dolev_ai.broker.ibkr import IBKRBroker
     from dolev_ai.broker.risk import RiskManager
     from dolev_ai.events import EventBus
+    from dolev_ai.position_tracker import PositionTracker
+    from dolev_ai.strategies.features import FeatureSnapshot
 
 logger = logging.getLogger(__name__)
 
@@ -77,8 +81,13 @@ async def auto_execute(
     event_bus: "EventBus | None" = None,
     broker: "IBKRBroker | None" = None,
     risk: "RiskManager | None" = None,
+    *,
+    features: "FeatureSnapshot | None" = None,
+    confidence: float | None = None,
+    components: dict | None = None,
+    tracker: "PositionTracker | None" = None,
 ) -> tuple[PaperPositionRow | None, str]:
-    """Open or close a position without human approval (high-conviction gradient signals).
+    """Open or close a position without human approval (high-conviction momentum signals).
 
     Persists the signal to DB first so we have a signal_id to attach to the position.
     Returns (position_row, status_text) — status_text is the Telegram-friendly summary.
@@ -88,22 +97,29 @@ async def auto_execute(
 
     if pos is None:
         # Open new position
-        new_pos = await open_position(signal_id, sig, session, event_bus, broker=broker, risk=risk)
+        new_pos = await open_position(
+            signal_id, sig, session, event_bus,
+            broker=broker, risk=risk,
+            features=features, confidence=confidence, tracker=tracker,
+        )
         if new_pos is None:
             return None, f"⚠️ Auto-execute failed for ${sig.ticker} (risk/broker blocked)"
         shares_str = f"{new_pos.shares} sh" if new_pos.shares else ""
         stop_str = f"stop=${new_pos.stop_price:.2f}" if new_pos.stop_price else ""
+        conf_str = f"  conf={confidence:.1f}" if confidence is not None else ""
         return new_pos, (
-            f"📈 Auto-{sig.side.upper()} {shares_str} ${sig.ticker} @ ${new_pos.entry_price:.2f}  {stop_str}\n"
-            f"_{sig.rationale}_" if sig.rationale else
-            f"📈 Auto-{sig.side.upper()} {shares_str} ${sig.ticker} @ ${new_pos.entry_price:.2f}  {stop_str}"
+            f"📈 Auto-{sig.side.upper()} {shares_str} ${sig.ticker} @ ${new_pos.entry_price:.2f}  "
+            f"{stop_str}{conf_str}"
         )
 
     if pos.side == sig.side:
         return None, f"⏸ Already holding {pos.side.upper()} ${sig.ticker} — no action"
 
     # Opposite side → auto-close
-    closed = await close_position(pos.id, signal_id, session, event_bus, broker=broker)
+    closed = await close_position(
+        pos.id, signal_id, session, event_bus,
+        broker=broker, exit_reason="opposite_signal", tracker=tracker,
+    )
     if closed is None:
         return None, f"⚠️ Auto-close failed for ${sig.ticker}"
     dollar_str = f"  (${closed.pnl_dollars:+,.2f})" if closed.pnl_dollars is not None else ""
@@ -120,16 +136,22 @@ async def open_position(
     event_bus: "EventBus | None" = None,
     broker: "IBKRBroker | None" = None,
     risk: "RiskManager | None" = None,
+    *,
+    features: "FeatureSnapshot | None" = None,
+    confidence: float | None = None,
+    tracker: "PositionTracker | None" = None,
 ) -> PaperPositionRow | None:
-    price = await get_price_async(sig.ticker)
-    if price is None:
+    signal_price = await get_price_async(sig.ticker)
+    if signal_price is None:
         logger.error(f"Cannot open position for {sig.ticker}: price unavailable")
         return None
 
+    price = signal_price
     shares: int | None = None
     stop_price: float | None = None
     ibkr_order_id: int | None = None
     ibkr_stop_order_id: int | None = None
+    fill_latency_ms: int | None = None
 
     if broker and broker.connected and risk:
         # IBKR path: real order with risk sizing + stop
@@ -140,7 +162,9 @@ async def open_position(
             logger.warning(f"Risk gate blocked {sig.ticker} — position not opened")
             return None
 
+        fill_started = time.monotonic()
         fill = await broker.place_bracket(spec)
+        fill_latency_ms = int((time.monotonic() - fill_started) * 1000)
         if fill is None:
             logger.error(f"IBKR order failed for {sig.ticker}")
             return None
@@ -152,7 +176,7 @@ async def open_position(
         ibkr_stop_order_id = fill.stop_order_id
         logger.info(
             f"IBKR fill: {sig.side.upper()} {shares} {sig.ticker} @ ${price:.2f}  "
-            f"stop=${stop_price:.2f}"
+            f"stop=${stop_price:.2f}  latency={fill_latency_ms}ms"
         )
     elif risk:
         # Simulation path with risk sizing (no real broker)
@@ -163,6 +187,14 @@ async def open_position(
             return None
         shares = spec.shares
         stop_price = spec.stop_price
+
+    # Slippage in bps (signed in the direction of the trade)
+    slippage_bps: float | None = None
+    if signal_price > 0:
+        raw = (price - signal_price) / signal_price * 10_000.0
+        slippage_bps = round(raw * (1 if sig.side == "buy" else -1), 2)
+
+    feature_json = _serialize_features(features) if features is not None else None
 
     pos = PaperPositionRow(
         ticker=sig.ticker,
@@ -175,14 +207,26 @@ async def open_position(
         ibkr_stop_order_id=ibkr_stop_order_id,
         opened_at=datetime.utcnow(),
         status="open",
+        signal_price=signal_price,
+        fill_latency_ms=fill_latency_ms,
+        slippage_bps=slippage_bps,
+        confidence_at_entry=confidence,
+        feature_snapshot_json=feature_json,
     )
     session.add(pos)
     session.commit()
+
+    if tracker is not None:
+        try:
+            tracker.track(pos.id)
+        except Exception as e:
+            logger.warning(f"PositionTracker.track failed for {pos.id}: {e}")
 
     mode = "IBKR" if ibkr_order_id else "sim"
     logger.info(
         f"Opened [{mode}] {sig.side.upper()} {sig.ticker} @ ${price:.2f}"
         + (f"  {shares} shares  stop=${stop_price:.2f}" if shares else "")
+        + (f"  slip={slippage_bps:+.1f}bp" if slippage_bps is not None else "")
     )
 
     if event_bus:
@@ -191,12 +235,28 @@ async def open_position(
             "ticker": sig.ticker,
             "side": sig.side,
             "entry_price": price,
+            "signal_price": signal_price,
             "shares": shares,
             "stop_price": stop_price,
             "position_id": pos.id,
             "mode": mode,
+            "fill_latency_ms": fill_latency_ms,
+            "slippage_bps": slippage_bps,
+            "confidence": confidence,
         })
     return pos
+
+
+def _serialize_features(features: Any) -> str:
+    """Best-effort JSON serialisation of a FeatureSnapshot (or dict)."""
+    try:
+        if is_dataclass(features):
+            return json.dumps(asdict(features))
+        if isinstance(features, dict):
+            return json.dumps(features)
+        return json.dumps(features.__dict__)
+    except Exception:
+        return "{}"
 
 
 async def close_position(
@@ -206,6 +266,9 @@ async def close_position(
     event_bus: "EventBus | None" = None,
     synthesizer=None,
     broker: "IBKRBroker | None" = None,
+    *,
+    exit_reason: str | None = None,
+    tracker: "PositionTracker | None" = None,
 ) -> PaperPositionRow | None:
     pos = session.get(PaperPositionRow, position_id)
     if pos is None or pos.status != "open":
@@ -239,7 +302,16 @@ async def close_position(
     pos.pnl_pct = pnl_pct
     pos.pnl_dollars = round(pnl_dollars, 2)
     pos.status = "closed"
+    if exit_reason is not None:
+        pos.exit_reason = exit_reason
     session.commit()
+
+    # Stop MFE/MAE polling for this position
+    if tracker is not None:
+        try:
+            await tracker.untrack(position_id)
+        except Exception as e:
+            logger.warning(f"PositionTracker.untrack failed for {position_id}: {e}")
 
     shares_int = pos.shares if isinstance(pos.shares, int) else None
     logger.info(
@@ -269,6 +341,9 @@ async def close_position(
             "shares": pos.shares,
             "position_id": pos.id,
             "retrospective": pos.retrospective,
+            "exit_reason": pos.exit_reason,
+            "mfe_pct": pos.mfe_pct,
+            "mae_pct": pos.mae_pct,
         })
     return pos
 

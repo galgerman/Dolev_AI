@@ -57,13 +57,31 @@ class Mover:
 
 @dataclass
 class MovementSnapshot:
-    """Latest movement state for one ticker — used by the aggregator."""
+    """Latest movement state for one ticker — used by the aggregator and strategies."""
     ticker: str
     pct_change: float
     last_price: float
     rel_volume: float
     captured_at: datetime
     gradient: float = 0.0   # %/min — 0.0 means not available
+    # Extended feature fields (research system)
+    roc_1m: float = 0.0
+    roc_3m: float = 0.0
+    roc_5m: float = 0.0
+    acceleration: float = 0.0
+    vwap: float = 0.0
+    vwap_state: str = "unknown"
+    extension_pct: float = 0.0
+    broke_pmh: bool = False
+    broke_pml: bool = False
+    rel_strength_spy: float = 0.0
+    rel_strength_qqq: float = 0.0
+    rel_strength_sector: float = 0.0
+    sector_etf: str | None = None
+    bid: float = 0.0
+    ask: float = 0.0
+    spread_pct: float = 0.0
+    breakout_volume_ratio: float = 0.0
 
 
 @dataclass
