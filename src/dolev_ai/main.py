@@ -536,6 +536,35 @@ class Agent:
         except Exception as e:
             logger.error(f"Could not start LLM extractor: {e}", exc_info=True)
 
+    async def _notify_market_open(self) -> None:
+        broker_status = "IBKR connected" if (self._broker and self._broker.connected) else "broker offline"
+        await self._bot.send_text(
+            f"*Market open* — 9:30 AM ET\n"
+            f"{broker_status}  |  pipeline: {self._pipeline_mode.upper()}\n"
+            f"_Momentum scanner running._"
+        )
+
+    async def _notify_market_close(self) -> None:
+        from dolev_ai.db import PaperPositionRow
+        with self._session_factory() as session:
+            open_count = (
+                session.query(PaperPositionRow)
+                .filter(PaperPositionRow.status == "open")
+                .count()
+            )
+        today_start = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+        with self._session_factory() as session:
+            trades_today = (
+                session.query(PaperPositionRow)
+                .filter(PaperPositionRow.opened_at >= today_start)
+                .count()
+            )
+        await self._bot.send_text(
+            f"*Market closed* — 4:00 PM ET\n"
+            f"Trades today: {trades_today}  |  Open positions: {open_count}\n"
+            f"_EOD flatten running..._"
+        )
+
     async def start_worker(self) -> bool:
         async with self._worker_lock:
             if self._scheduler is not None:
@@ -615,6 +644,19 @@ class Agent:
                     hour=eod_cfg.get("cron_hour_utc", 21),
                     minute=eod_cfg.get("cron_minute", 0),
                 )
+            # Market open / close notifications (ET timezone)
+            if self._momentum_enabled:
+                scheduler.add_job(
+                    self._notify_market_open, "cron",
+                    day_of_week="mon-fri", hour=9, minute=30,
+                    timezone="America/New_York",
+                )
+                scheduler.add_job(
+                    self._notify_market_close, "cron",
+                    day_of_week="mon-fri", hour=16, minute=0,
+                    timezone="America/New_York",
+                )
+
             scheduler.start()
             self._scheduler = scheduler
             self._worker_started_at = datetime.utcnow()
@@ -627,6 +669,12 @@ class Agent:
             logger.info(
                 f"Dolev AI agent started [pipeline={self._pipeline_mode}, "
                 f"twitter={'on' if self._twitter_enabled else 'off'}]."
+            )
+            broker_status = "IBKR connected" if (self._broker and self._broker.connected) else "broker offline"
+            await self._bot.send_text(
+                f"*Dolev AI started* — mode: {self._pipeline_mode.upper()}\n"
+                f"{broker_status}  |  auto≥{self._auto_execute_conf:.0f}/100\n"
+                f"_Watching for signals..._"
             )
             return True
 
@@ -643,6 +691,7 @@ class Agent:
                 await self._observer.stop()
             if self._tracker is not None:
                 await self._tracker.stop_all()
+            await self._bot.send_text("*Dolev AI stopped.*")
             await self._bot.stop()
             await self._source.stop()
             await self._tv_source.stop()
