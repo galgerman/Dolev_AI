@@ -46,6 +46,15 @@ paper_trading:
   approval_timeout_minutes: 15
   price_cache_seconds: 60
 
+exit_rules:
+  take_profit_pct: 3.0            # close immediately at +3% gain
+  trailing_stop_start_pct: 2.0    # activate trailing stop after +2% gain
+  trailing_stop_distance_pct: 1.0 # trail 1% behind MFE peak
+  max_hold_minutes: 60            # force-close after 60 min if profit < min_profit_to_hold
+  min_hold_minutes: 3             # never exit within the first 3 min (let trade breathe)
+  min_profit_to_hold_pct: 0.5     # keep holding past max_hold if up >= 0.5%
+  confidence_exit_threshold: 35.0 # close if live re-score drops below 35/100
+
 # ── Research-grade pipeline switch ───────────────────────────────────────────
 # observe — full feature pipeline runs, signals + forward returns are recorded,
 #           NO orders are placed, NO per-signal Telegram blast (only digests).

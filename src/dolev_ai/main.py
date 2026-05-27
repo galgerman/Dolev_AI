@@ -29,6 +29,7 @@ from dolev_ai.db import (
     load_extractions_since,
     load_latest_movements,
     log_alert,
+    open_positions,
     pending_approvals_older_than,
     prune_old_data,
     save_graph_edge,
@@ -192,6 +193,16 @@ class Agent:
         weight_overrides = feat_cfg.get("confidence_weights")
         from dolev_ai.strategies.confidence import ConfidenceScorer
         self._scorer = ConfidenceScorer(weights=weight_overrides)
+
+        # Exit rules
+        exit_cfg = cfg.get("exit_rules", {}) or {}
+        self._exit_take_profit_pct = exit_cfg.get("take_profit_pct", 3.0)
+        self._exit_trail_start_pct = exit_cfg.get("trailing_stop_start_pct", 2.0)
+        self._exit_trail_distance_pct = exit_cfg.get("trailing_stop_distance_pct", 1.0)
+        self._exit_max_hold_minutes = exit_cfg.get("max_hold_minutes", 60)
+        self._exit_min_hold_minutes = exit_cfg.get("min_hold_minutes", 3)
+        self._exit_min_profit_to_hold_pct = exit_cfg.get("min_profit_to_hold_pct", 0.5)
+        self._exit_confidence_threshold = exit_cfg.get("confidence_exit_threshold", 35.0)
 
         # Forward-return observer + MFE/MAE tracker (lazy-started in start_worker)
         from dolev_ai.observer import ForwardReturnObserver
@@ -536,6 +547,136 @@ class Agent:
         except Exception as e:
             logger.error(f"Could not start LLM extractor: {e}", exc_info=True)
 
+    async def close_all_positions(self, exit_reason: str = "manual") -> int:
+        """Close every open position immediately. Returns number closed."""
+        with self._session_factory() as session:
+            positions = open_positions(session)
+            ids = [p.id for p in positions]
+
+        closed = 0
+        for pos_id in ids:
+            with self._session_factory() as session:
+                pos = session.get(PaperPositionRow, pos_id)
+                if pos is None or pos.status != "open":
+                    continue
+                closed_pos = await paper_trade.close_position(
+                    pos_id, 0, session,
+                    event_bus=self._event_bus,
+                    broker=self._broker,
+                    exit_reason=exit_reason,
+                    tracker=self._tracker,
+                )
+                if closed_pos:
+                    hold_min = (datetime.utcnow() - pos.opened_at).total_seconds() / 60
+                    await self._bot.send_trade_close(
+                        closed_pos,
+                        mfe_pct=closed_pos.mfe_pct,
+                        mae_pct=closed_pos.mae_pct,
+                        hold_minutes=hold_min,
+                        exit_reason=exit_reason,
+                        edit_message_id=closed_pos.telegram_message_id,
+                    )
+                    closed += 1
+        if closed:
+            logger.info(f"close_all_positions: closed {closed} position(s) [{exit_reason}]")
+        return closed
+
+    async def check_position_exits(self) -> None:
+        """Check all open positions against exit rules every eval cycle."""
+        if not self._momentum_enabled or self._pipeline_mode == "observe":
+            return
+        from dolev_ai.utils.market_hours import is_us_market_open
+        if not is_us_market_open():
+            return
+        from dolev_ai.prices import get_price_async
+        from dolev_ai.strategies.features import FeatureSnapshot
+
+        with self._session_factory() as session:
+            positions = open_positions(session)
+            pos_data = [
+                {
+                    "id": p.id, "ticker": p.ticker, "side": p.side,
+                    "entry_price": p.entry_price, "opened_at": p.opened_at,
+                    "mfe_pct": p.mfe_pct or 0.0, "mae_pct": p.mae_pct or 0.0,
+                    "telegram_message_id": p.telegram_message_id,
+                    "features_json": p.feature_snapshot_json,
+                }
+                for p in positions
+            ]
+
+        for pd in pos_data:
+            price = await get_price_async(pd["ticker"])
+            if not price:
+                continue
+
+            entry = pd["entry_price"] or 0
+            if entry == 0:
+                continue
+
+            side_sign = 1 if pd["side"] == "buy" else -1
+            current_pct = (price - entry) / entry * 100 * side_sign
+            mfe_pct = pd["mfe_pct"]
+            hold_minutes = (datetime.utcnow() - pd["opened_at"]).total_seconds() / 60
+
+            exit_reason = None
+
+            # 1) Minimum hold — never exit in first N minutes
+            if hold_minutes < self._exit_min_hold_minutes:
+                continue
+
+            # 2) Take profit
+            if current_pct >= self._exit_take_profit_pct:
+                exit_reason = "take_profit"
+
+            # 3) Trailing stop — activate only after MFE crosses start threshold
+            elif mfe_pct >= self._exit_trail_start_pct:
+                trail_stop = mfe_pct - self._exit_trail_distance_pct
+                if current_pct <= trail_stop:
+                    exit_reason = "trailing_stop"
+
+            # 4) Time-based exit — held too long with no meaningful profit
+            elif hold_minutes >= self._exit_max_hold_minutes:
+                if current_pct < self._exit_min_profit_to_hold_pct:
+                    exit_reason = "time_exit"
+
+            # 5) Confidence decay — re-score from stored features
+            if exit_reason is None and pd["features_json"]:
+                try:
+                    import json as _json
+                    feat_dict = _json.loads(pd["features_json"])
+                    snap = FeatureSnapshot(**{
+                        k: v for k, v in feat_dict.items()
+                        if k in FeatureSnapshot.__dataclass_fields__
+                    })
+                    result = self._scorer.score(snap, pd["side"])
+                    if result.score < self._exit_confidence_threshold:
+                        exit_reason = "confidence_decay"
+                except Exception:
+                    pass
+
+            if exit_reason:
+                logger.info(
+                    f"Exit [{exit_reason}] {pd['side'].upper()} ${pd['ticker']} "
+                    f"current={current_pct:+.2f}%  MFE={mfe_pct:+.2f}%  hold={hold_minutes:.1f}m"
+                )
+                with self._session_factory() as session:
+                    closed_pos = await paper_trade.close_position(
+                        pd["id"], 0, session,
+                        event_bus=self._event_bus,
+                        broker=self._broker,
+                        exit_reason=exit_reason,
+                        tracker=self._tracker,
+                    )
+                if closed_pos:
+                    await self._bot.send_trade_close(
+                        closed_pos,
+                        mfe_pct=closed_pos.mfe_pct,
+                        mae_pct=closed_pos.mae_pct,
+                        hold_minutes=hold_minutes,
+                        exit_reason=exit_reason,
+                        edit_message_id=closed_pos.telegram_message_id,
+                    )
+
     async def _notify_market_open(self) -> None:
         broker_status = "IBKR connected" if (self._broker and self._broker.connected) else "broker offline"
         await self._bot.send_text(
@@ -621,6 +762,11 @@ class Agent:
                     self.evaluate_gradient, "interval",
                     seconds=self._momentum_eval_seconds,
                     next_run_time=datetime.utcnow() + timedelta(seconds=20),
+                )
+                scheduler.add_job(
+                    self.check_position_exits, "interval",
+                    seconds=self._momentum_eval_seconds,
+                    next_run_time=datetime.utcnow() + timedelta(seconds=25),
                 )
                 # EOD flatten — check every minute near close
                 scheduler.add_job(self.eod_flatten, "interval", minutes=1)
