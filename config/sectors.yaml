@@ -1,0 +1,23 @@
+# Yahoo Finance "sector" string → SPDR sector ETF symbol.
+# yfinance returns broad sector labels (Technology, Healthcare, etc.).
+# Unknown / missing sector falls back to QQQ.
+industry_to_etf:
+  Technology: XLK
+  Communication Services: XLC
+  Consumer Cyclical: XLY
+  Consumer Defensive: XLP
+  Energy: XLE
+  Financial Services: XLF
+  Healthcare: XLV
+  Industrials: XLI
+  Basic Materials: XLB
+  Real Estate: XLRE
+  Utilities: XLU
+
+# Fallback when yfinance has no sector info for a ticker
+fallback_etf: QQQ
+
+# Hand-tuned overrides for tickers where the yfinance sector is wrong or stale.
+# Format: TICKER: ETF
+overrides:
+  # Add as needed, e.g. SPY: SPY

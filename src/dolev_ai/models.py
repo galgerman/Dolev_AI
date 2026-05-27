@@ -42,25 +42,46 @@ class TickerScore:
 
 @dataclass
 class Mover:
-    """A ticker currently in TradingView's top gainers/losers."""
+    """A ticker currently in top gainers/losers (TradingView or IBKR scanner)."""
     ticker: str
     pct_change: float       # signed: -8.2 = down 8.2%
     last_price: float
-    rel_volume: float       # vs 10-day average; 1.0 = normal
+    rel_volume: float       # vs 10-day average; 1.0 = normal (TradingView) or 0 (IBKR)
     market_cap: float       # USD
     rank: int               # rank within fetched side (0 = strongest)
     side: str               # "gainer" | "loser"
     captured_at: datetime
+    gradient: float = 0.0   # %/min linear slope over last N 1-min bars (IBKR only)
+    gradient_bars: int = 0  # how many bars gradient was computed over
 
 
 @dataclass
 class MovementSnapshot:
-    """Latest movement state for one ticker — used by the aggregator."""
+    """Latest movement state for one ticker — used by the aggregator and strategies."""
     ticker: str
     pct_change: float
     last_price: float
     rel_volume: float
     captured_at: datetime
+    gradient: float = 0.0   # %/min — 0.0 means not available
+    # Extended feature fields (research system)
+    roc_1m: float = 0.0
+    roc_3m: float = 0.0
+    roc_5m: float = 0.0
+    acceleration: float = 0.0
+    vwap: float = 0.0
+    vwap_state: str = "unknown"
+    extension_pct: float = 0.0
+    broke_pmh: bool = False
+    broke_pml: bool = False
+    rel_strength_spy: float = 0.0
+    rel_strength_qqq: float = 0.0
+    rel_strength_sector: float = 0.0
+    sector_etf: str | None = None
+    bid: float = 0.0
+    ask: float = 0.0
+    spread_pct: float = 0.0
+    breakout_volume_ratio: float = 0.0
 
 
 @dataclass

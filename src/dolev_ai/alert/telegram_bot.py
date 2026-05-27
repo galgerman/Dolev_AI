@@ -103,6 +103,56 @@ class TelegramBot:
             return None
         return await self._send(text, reply_markup=None)
 
+    # ── Rich trade journal (notification-only, no buttons) ──────────────────
+
+    async def send_trade_open(
+        self,
+        pos,
+        *,
+        features=None,
+        components: dict | None = None,
+        latency_ms: int | None = None,
+        slippage_bps: float | None = None,
+        confidence: float | None = None,
+        mode: str = "paper",
+    ) -> int | None:
+        """Send rich entry-of-trade journal. Returns message_id so close can edit.
+
+        Format intentionally compact and monospaced for legibility on mobile.
+        """
+        text = format_trade_open(
+            pos, features=features, components=components,
+            latency_ms=latency_ms, slippage_bps=slippage_bps,
+            confidence=confidence, mode=mode,
+        )
+        if self._dry_run or not self._token:
+            print(f"\n[TG-DRY-RUN OPEN]\n{text}\n")
+            return None
+        return await self._send(text, reply_markup=None)
+
+    async def send_trade_close(
+        self,
+        pos,
+        *,
+        mfe_pct: float | None = None,
+        mae_pct: float | None = None,
+        hold_minutes: float | None = None,
+        exit_reason: str | None = None,
+        edit_message_id: int | None = None,
+    ) -> int | None:
+        """Send close-of-trade summary. If edit_message_id is provided, edits the entry post."""
+        text = format_trade_close(
+            pos, mfe_pct=mfe_pct, mae_pct=mae_pct,
+            hold_minutes=hold_minutes, exit_reason=exit_reason,
+        )
+        if edit_message_id is not None:
+            await self.edit_message(edit_message_id, text)
+            return edit_message_id
+        if self._dry_run or not self._token:
+            print(f"\n[TG-DRY-RUN CLOSE]\n{text}\n")
+            return None
+        return await self._send(text, reply_markup=None)
+
     async def edit_message(self, message_id: int, text: str) -> None:
         if self._dry_run or not self._token:
             print(f"\n[TG-EDIT msg={message_id}] {text}\n")
@@ -203,3 +253,145 @@ class TelegramBot:
 
         if self._on_callback:
             await self._on_callback(approval_id, decision)
+
+
+# ── Trade-journal formatters (module-level so tests can hit them) ──────────
+
+_COMPONENT_ORDER = [
+    "gradient", "acceleration", "roc_3m",
+    "rel_strength_spy", "rel_strength_sector",
+    "vwap_above", "broke_pmh",
+    "rel_volume", "extension_penalty", "spread_penalty",
+]
+
+
+def format_trade_open(
+    pos,
+    *,
+    features=None,
+    components: dict | None = None,
+    latency_ms: int | None = None,
+    slippage_bps: float | None = None,
+    confidence: float | None = None,
+    mode: str = "paper",
+) -> str:
+    side = (pos.side or "").upper()
+    emoji = "📈" if side == "BUY" else "📉"
+    mode_label = mode.upper()
+    head_bits = [f"{emoji} {mode_label} {side} ${pos.ticker}"]
+    if confidence is not None:
+        head_bits.append(f"conf={confidence:.1f}/100")
+    head = "  ".join(head_bits)
+
+    fill_bits = []
+    if getattr(pos, "shares", None):
+        fill_bits.append(f"{pos.shares} sh")
+    fill_bits.append(f"@ ${pos.entry_price:.2f}")
+    if getattr(pos, "stop_price", None):
+        fill_bits.append(f"stop ${pos.stop_price:.2f}")
+    fill_line = "  ".join(fill_bits)
+
+    timing_bits = []
+    if latency_ms is not None:
+        timing_bits.append(f"latency: {latency_ms}ms")
+    if slippage_bps is not None:
+        timing_bits.append(f"slip: {slippage_bps:+.1f}bp")
+    timing_line = "  ".join(timing_bits)
+
+    out = [head, f"  fill: {fill_line}"]
+    if timing_line:
+        out.append(f"  {timing_line}")
+
+    # Features block (compact)
+    if features is not None:
+        feat_lines = ["", "Why:"]
+        feat_lines.extend(_features_block(features))
+        out.extend(feat_lines)
+
+    # Component contribution table
+    if components:
+        out.append("```")
+        for name in _COMPONENT_ORDER:
+            if name in components:
+                val = components[name]
+                out.append(f"  {name:<22} {val:+6.1f}")
+        if confidence is not None:
+            out.append(f"  {'':<22} {'='}")
+            out.append(f"  {'total':<22} {confidence:6.1f}")
+        out.append("```")
+    return "\n".join(out)
+
+
+def format_trade_close(
+    pos,
+    *,
+    mfe_pct: float | None = None,
+    mae_pct: float | None = None,
+    hold_minutes: float | None = None,
+    exit_reason: str | None = None,
+) -> str:
+    side = (pos.side or "").upper()
+    emoji = "✅" if (pos.pnl_pct or 0) >= 0 else "❌"
+
+    head = f"{emoji} CLOSED {side} ${pos.ticker} @ ${(pos.exit_price or 0):.2f}"
+
+    pnl_bits = []
+    if pos.pnl_pct is not None:
+        pnl_bits.append(f"P&L: {pos.pnl_pct:+.2%}")
+    if pos.pnl_dollars is not None:
+        pnl_bits.append(f"(${pos.pnl_dollars:+,.2f})")
+    pnl_line = "  ".join(pnl_bits)
+
+    out = [head]
+    if pnl_line:
+        out.append(f"  {pnl_line}")
+    if mfe_pct is not None or mae_pct is not None:
+        mfe_str = f"MFE {mfe_pct:+.2f}%" if mfe_pct is not None else ""
+        mae_str = f"MAE {mae_pct:+.2f}%" if mae_pct is not None else ""
+        out.append(f"  {mfe_str}  {mae_str}".strip())
+    if hold_minutes is not None:
+        out.append(f"  hold: {hold_minutes:.1f}m")
+    if exit_reason:
+        out.append(f"  reason: {exit_reason}")
+    return "\n".join(out)
+
+
+def _features_block(features) -> list[str]:
+    """Render a FeatureSnapshot (or dict) as compact lines."""
+    def g(name, default=None):
+        if isinstance(features, dict):
+            return features.get(name, default)
+        return getattr(features, name, default)
+
+    lines = []
+    grad = g("gradient")
+    if grad is not None:
+        lines.append(f"  gradient    {grad:+.3f}%/min")
+    accel = g("acceleration")
+    if accel is not None:
+        lines.append(f"  accel       {accel:+.3f}")
+    roc3 = g("roc_3m")
+    if roc3 is not None:
+        lines.append(f"  roc_3m      {roc3:+.2f}%")
+    rs_spy = g("rel_strength_spy")
+    if rs_spy is not None:
+        lines.append(f"  rs_spy      {rs_spy:+.3f}")
+    rs_sec = g("rel_strength_sector")
+    if rs_sec is not None:
+        lines.append(f"  rs_sector   {rs_sec:+.3f}")
+    vwap = g("vwap_state")
+    if vwap:
+        lines.append(f"  vwap        {vwap}")
+    pmh = g("broke_pmh", False)
+    pml = g("broke_pml", False)
+    if pmh:
+        lines.append("  pmh         broke")
+    if pml:
+        lines.append("  pml         broke")
+    rel_vol = g("rel_volume")
+    if rel_vol is not None:
+        lines.append(f"  rel_vol     {rel_vol:.2f}x")
+    spread = g("spread_pct")
+    if spread is not None:
+        lines.append(f"  spread      {spread:.2f}%")
+    return lines

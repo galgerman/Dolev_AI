@@ -765,7 +765,11 @@ async def approval_decide(approval_id: int, body: dict, db: Session = Depends(_s
     import dolev_ai.paper_trade as pt
     event_bus = _event_bus
     synthesizer = _agent_control._synthesizer if _agent_control else None
-    ack = await pt.handle_approval_callback(approval_id, decision, db, event_bus, synthesizer)
+    broker = getattr(_agent_control, "_broker", None) if _agent_control else None
+    risk = getattr(_agent_control, "_risk", None) if _agent_control else None
+    ack = await pt.handle_approval_callback(
+        approval_id, decision, db, event_bus, synthesizer, broker=broker, risk=risk
+    )
     # Edit TG message if possible
     if _agent_control and hasattr(_agent_control, "_bot"):
         from dolev_ai.db import get_approval

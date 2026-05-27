@@ -29,6 +29,7 @@ from dolev_ai.db import (
     load_extractions_since,
     load_latest_movements,
     log_alert,
+    open_positions,
     pending_approvals_older_than,
     prune_old_data,
     save_graph_edge,
@@ -114,6 +115,50 @@ class Agent:
         pt_cfg = cfg.get("paper_trading", {})
         self._approval_timeout_minutes = pt_cfg.get("approval_timeout_minutes", 15)
         self._synthesizer = Synthesizer()
+
+        # Broker + risk management
+        broker_cfg = cfg.get("broker", {}) or {}
+        self._broker_enabled = broker_cfg.get("enabled", False)
+        self._broker: "IBKRBroker | None" = None
+        self._risk: "RiskManager | None" = None
+        self._ibkr_market: "IBKRMarketSource | None" = None
+        from dolev_ai.broker.risk import RiskManager
+        risk_cfg = broker_cfg.get("risk", {}) or {}
+        self._risk = RiskManager(
+            max_position_pct=risk_cfg.get("max_position_pct", 2.0),
+            stop_loss_pct=risk_cfg.get("stop_loss_pct", 2.0),
+            max_open_positions=risk_cfg.get("max_open_positions", 5),
+        )
+        # Shared reference data cache (per-cycle gradients + sector ETFs + premarket H/L)
+        from dolev_ai.strategies.reference_data import ReferenceCache
+        self._ref_cache = ReferenceCache()
+
+        if self._broker_enabled:
+            from dolev_ai.broker.ibkr import IBKRBroker
+            self._broker = IBKRBroker(
+                host=broker_cfg.get("host", "127.0.0.1"),
+                port=broker_cfg.get("port", 7497),
+                client_id=broker_cfg.get("client_id", 1),
+                timeout=broker_cfg.get("connect_timeout_s", 10.0),
+            )
+            md_cfg = broker_cfg.get("market_data", {}) or {}
+            if md_cfg.get("enabled", False):
+                from dolev_ai.broker.market_data import IBKRMarketSource
+                self._ibkr_market = IBKRMarketSource(
+                    broker=self._broker,
+                    reference_cache=self._ref_cache,
+                    top_n_per_side=md_cfg.get("top_n_per_side", 50),
+                    gradient_top_n=md_cfg.get("gradient_top_n", 20),
+                    gradient_bars=md_cfg.get("gradient_bars", 10),
+                    feature_bars=md_cfg.get("feature_bars", 12),
+                    min_market_cap_m=float(broker_cfg.get("min_market_cap_m",
+                        cfg.get("tradingview", {}).get("min_market_cap_m", 100))),
+                    min_volume=broker_cfg.get("min_volume",
+                        cfg.get("tradingview", {}).get("min_volume", 100_000)),
+                    snapshot_enabled=md_cfg.get("snapshot_enabled", True),
+                )
+                logger.info("IBKR market data source enabled — will replace TradingView")
+
         tg_cfg = cfg.get("trust_graph", {})
         with self._session_factory() as session:
             self._strategy = TrustGraphStrategy(
@@ -122,6 +167,83 @@ class Agent:
                 cooldown_hours=tg_cfg.get("cooldown_hours", 4.0),
                 cooldown_override_multiplier=tg_cfg.get("cooldown_override_multiplier", 2.0),
                 last_alert_time_fn=lambda t: last_alert_time(session, t),
+            )
+
+        # Pipeline mode (observe | paper | live) — research-grade switch
+        pipeline_cfg = cfg.get("pipeline", {}) or {}
+        self._pipeline_mode = pipeline_cfg.get("mode", "paper")
+        self._auto_execute_conf = pipeline_cfg.get("auto_execute_confidence_min", 70.0)
+        self._approval_conf = pipeline_cfg.get("approval_confidence_min", 50.0)
+
+        # Top-level Twitter kill switch
+        twitter_cfg = cfg.get("twitter", {}) or {}
+        self._twitter_enabled = twitter_cfg.get("enabled", False)
+
+        # Observer + position tracker config
+        observer_cfg = cfg.get("observer", {}) or {}
+        self._observer_horizons = observer_cfg.get(
+            "horizons_seconds", [30, 60, 180, 300, 900, 1800]
+        )
+        self._observer_tick_seconds = observer_cfg.get("tick_seconds", 5.0)
+        tracker_cfg = cfg.get("position_tracker", {}) or {}
+        self._tracker_poll_seconds = tracker_cfg.get("poll_seconds", 5.0)
+
+        # Confidence scorer (weights come from config; defaults baked in)
+        feat_cfg = cfg.get("features", {}) or {}
+        weight_overrides = feat_cfg.get("confidence_weights")
+        from dolev_ai.strategies.confidence import ConfidenceScorer
+        self._scorer = ConfidenceScorer(weights=weight_overrides)
+
+        # Exit rules
+        exit_cfg = cfg.get("exit_rules", {}) or {}
+        self._exit_take_profit_pct = exit_cfg.get("take_profit_pct", 3.0)
+        self._exit_trail_start_pct = exit_cfg.get("trailing_stop_start_pct", 2.0)
+        self._exit_trail_distance_pct = exit_cfg.get("trailing_stop_distance_pct", 1.0)
+        self._exit_max_hold_minutes = exit_cfg.get("max_hold_minutes", 60)
+        self._exit_min_hold_minutes = exit_cfg.get("min_hold_minutes", 3)
+        self._exit_min_profit_to_hold_pct = exit_cfg.get("min_profit_to_hold_pct", 0.5)
+        self._exit_confidence_threshold = exit_cfg.get("confidence_exit_threshold", 35.0)
+
+        # Forward-return observer + MFE/MAE tracker (lazy-started in start_worker)
+        from dolev_ai.observer import ForwardReturnObserver
+        from dolev_ai.position_tracker import PositionTracker
+        from dolev_ai.prices import get_price_async
+        self._observer: ForwardReturnObserver | None = ForwardReturnObserver(
+            self._session_factory, get_price_async, tick_seconds=self._observer_tick_seconds,
+        )
+        self._tracker: PositionTracker | None = PositionTracker(
+            self._session_factory, get_price_async, poll_seconds=self._tracker_poll_seconds,
+        )
+
+        # Momentum / gradient strategy
+        mom_cfg = cfg.get("momentum", {}) or {}
+        self._momentum_enabled = mom_cfg.get("enabled", False)
+        # Twitter is gated at the top level now; momentum still honours its own legacy switch
+        self._momentum_disable_twitter = (
+            not self._twitter_enabled
+            or mom_cfg.get("disable_timeline_scraping", True)
+        )
+        self._momentum_poll_seconds = mom_cfg.get("poll_cadence_seconds", 30)
+        self._momentum_eval_seconds = mom_cfg.get("eval_cadence_seconds", 15)
+        self._momentum_flatten_before_close = mom_cfg.get("flatten_minutes_before_close", 5)
+        self._momentum_approval_timeout_sec = mom_cfg.get("approval_timeout_seconds", 60)
+        self._gradient_strategy = None
+        if self._momentum_enabled:
+            from dolev_ai.strategies.gradient import MomentumStrategy
+            self._gradient_strategy = MomentumStrategy(
+                scorer=self._scorer,
+                auto_execute_confidence=self._auto_execute_conf,
+                approval_confidence=self._approval_conf,
+                entry_threshold_pct_per_min=mom_cfg.get("entry_threshold_pct_per_min", 0.3),
+                min_total_move_pct=mom_cfg.get("min_total_move_pct", 1.5),
+                max_trades_per_day=mom_cfg.get("max_trades_per_day", 10),
+                held_ticker_fn=self._held_side_for,
+                trades_today_fn=self._trades_opened_today,
+            )
+            logger.info(
+                f"Momentum mode ON [pipeline={self._pipeline_mode}] — "
+                f"auto≥{self._auto_execute_conf}/100, approval≥{self._approval_conf}/100, "
+                f"max {mom_cfg.get('max_trades_per_day', 10)} trades/day"
             )
         # Track last threshold_progress per ticker to detect near-threshold crossings
         self._last_threshold_progress: dict[str, float] = {}
@@ -158,7 +280,8 @@ class Agent:
         """Called by TelegramBot when a user taps an inline button."""
         with self._session_factory() as session:
             ack = await paper_trade.handle_approval_callback(
-                approval_id, decision, session, self._event_bus, self._synthesizer
+                approval_id, decision, session, self._event_bus, self._synthesizer,
+                broker=self._broker, risk=self._risk,
             )
             approval = session.get(SignalApprovalRow, approval_id)
             if approval and approval.telegram_message_id:
@@ -168,16 +291,212 @@ class Agent:
     async def expire_approvals(self) -> None:
         """Mark pending approvals older than timeout as expired."""
         from datetime import timedelta
-        cutoff = datetime.utcnow() - timedelta(minutes=self._approval_timeout_minutes)
+        # Momentum mode uses a short seconds-based timeout; trust-graph uses minutes.
+        if self._momentum_enabled:
+            cutoff = datetime.utcnow() - timedelta(seconds=self._momentum_approval_timeout_sec)
+        else:
+            cutoff = datetime.utcnow() - timedelta(minutes=self._approval_timeout_minutes)
         with self._session_factory() as session:
             stale = pending_approvals_older_than(session, cutoff)
             for approval in stale:
                 ack = await paper_trade.handle_approval_callback(
-                    approval.id, "expired", session, self._event_bus, self._synthesizer
+                    approval.id, "expired", session, self._event_bus, self._synthesizer,
+                    broker=self._broker, risk=self._risk,
                 )
                 if approval.telegram_message_id:
                     await self._bot.edit_message(approval.telegram_message_id, ack)
                 logger.info(f"Expired approval {approval.id} for signal {approval.signal_id}")
+
+    # ── Momentum helpers ────────────────────────────────────────────────────
+
+    def _held_side_for(self, ticker: str) -> str | None:
+        """Return 'buy'/'sell' if we have an open position in this ticker, else None."""
+        from dolev_ai.db import position_for_ticker
+        with self._session_factory() as session:
+            pos = position_for_ticker(session, ticker)
+            return pos.side if pos else None
+
+    def _trades_opened_today(self) -> int:
+        """Count positions opened since midnight UTC (proxy for trades today)."""
+        from dolev_ai.db import PaperPositionRow
+        today_start = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+        with self._session_factory() as session:
+            return (
+                session.query(PaperPositionRow)
+                .filter(PaperPositionRow.opened_at >= today_start)
+                .count()
+            )
+
+    async def evaluate_gradient(self) -> None:
+        """Run MomentumStrategy against the latest movements.
+
+        Pipeline mode:
+          observe — record signal observation, NO orders, NO Telegram per-signal
+          paper   — record observation + auto-execute through paper broker + rich Telegram journal
+          live    — same as paper but broker.trading_mode='live' (config-gated)
+        """
+        if not self._momentum_enabled or self._gradient_strategy is None:
+            return
+        from dolev_ai.utils.market_hours import is_us_market_open
+        if not is_us_market_open():
+            return
+
+        with self._session_factory() as session:
+            movements = load_latest_movements(session, max_age_minutes=5)
+
+        if not movements:
+            return
+
+        signals = self._gradient_strategy.evaluate(movements)
+        if not signals:
+            return
+
+        logger.info(
+            f"Momentum strategy [{self._pipeline_mode}]: {len(signals)} signal(s)"
+        )
+
+        from dolev_ai.db import save_signal_observation as _save_obs
+        from dataclasses import asdict as _asdict
+
+        for ms in signals:
+            sig = ms.signal
+            mv = movements.get(sig.ticker)
+            entry_price = mv.last_price if mv is not None else 0.0
+            sector_etf = mv.sector_etf if mv is not None else None
+
+            # Always record a signal observation — fuels research reports
+            try:
+                with self._session_factory() as session:
+                    _save_obs(
+                        session,
+                        ticker=sig.ticker,
+                        side=sig.side,
+                        entry_price=entry_price,
+                        confidence=ms.confidence,
+                        components=ms.components,
+                        features=_asdict(ms.features),
+                        horizons_seconds=self._observer_horizons,
+                        sector_etf=sector_etf,
+                        generated_at=sig.generated_at,
+                    )
+            except Exception as e:
+                logger.warning(f"Failed to record signal observation: {e}")
+
+            await self._event_bus.publish({
+                "type": "signal.fired",
+                "ticker": sig.ticker,
+                "side": sig.side,
+                "confidence": ms.confidence,
+                "conviction": sig.conviction,
+                "key_drivers": sig.key_drivers,
+                "components": ms.components,
+                "generated_at": sig.generated_at.isoformat(),
+                "pipeline_mode": self._pipeline_mode,
+                "auto_executed": ms.auto_execute and self._pipeline_mode != "observe",
+            })
+
+            # Observe mode: stop here. No orders, no Telegram blast.
+            if self._pipeline_mode == "observe":
+                continue
+
+            # Paper / live: route through the broker
+            with self._session_factory() as session:
+                if ms.auto_execute:
+                    pos, _ = await paper_trade.auto_execute(
+                        sig, session, self._event_bus,
+                        broker=self._broker, risk=self._risk,
+                        features=ms.features, confidence=ms.confidence,
+                        components=ms.components, tracker=self._tracker,
+                    )
+                    log_alert(session, sig)
+                    if pos is not None and pos.status == "open":
+                        msg_id = await self._bot.send_trade_open(
+                            pos,
+                            features=ms.features,
+                            components=ms.components,
+                            latency_ms=pos.fill_latency_ms,
+                            slippage_bps=pos.slippage_bps,
+                            confidence=ms.confidence,
+                            mode=self._pipeline_mode,
+                        )
+                        if msg_id is not None:
+                            pos.telegram_message_id = msg_id
+                            session.commit()
+                    elif pos is not None and pos.status == "closed":
+                        # auto_execute closed an opposite-side position
+                        hold_min = None
+                        if pos.opened_at and pos.closed_at:
+                            hold_min = (pos.closed_at - pos.opened_at).total_seconds() / 60.0
+                        await self._bot.send_trade_close(
+                            pos, mfe_pct=pos.mfe_pct, mae_pct=pos.mae_pct,
+                            hold_minutes=hold_min, exit_reason=pos.exit_reason,
+                            edit_message_id=pos.telegram_message_id,
+                        )
+                else:
+                    signal_id = save_signal(session, sig)
+                    log_alert(session, sig)
+                    action = paper_trade.handle_signal(sig, session)
+                    if action.kind == paper_trade.ActionKind.PROPOSE_OPEN:
+                        approval_id = save_pending_approval(session, "open", signal_id)
+                        msg_id = await self._bot.send_open_prompt(sig, approval_id)
+                        if msg_id:
+                            set_approval_message_id(session, approval_id, msg_id)
+                    elif action.kind == paper_trade.ActionKind.PROPOSE_CLOSE:
+                        approval_id = save_pending_approval(
+                            session, "close", signal_id,
+                            position_id=action.position.id if action.position else None,
+                        )
+                        msg_id = await self._bot.send_close_prompt(
+                            action.position, sig, approval_id
+                        )
+                        if msg_id:
+                            set_approval_message_id(session, approval_id, msg_id)
+
+    async def eod_flatten(self) -> None:
+        """Close all open positions a few minutes before market close."""
+        if not self._momentum_enabled:
+            return
+        from dolev_ai.utils.market_hours import minutes_to_close
+        mtc = minutes_to_close()
+        if mtc is None:
+            return  # market closed
+        if mtc > self._momentum_flatten_before_close:
+            return  # not yet — wait for the window
+
+        from dolev_ai.db import open_positions as _open_positions
+        with self._session_factory() as session:
+            positions = _open_positions(session)
+        if not positions:
+            return
+
+        logger.info(f"EOD flatten: closing {len(positions)} positions ({mtc} min to close)")
+        closed_count = 0
+        for pos in positions:
+            with self._session_factory() as session:
+                # Use a synthetic exit_signal_id = -1 to mark EOD-close
+                result = await paper_trade.close_position(
+                    pos.id, -1, session, self._event_bus, broker=self._broker,
+                    exit_reason="eod_flatten", tracker=self._tracker,
+                )
+                if result:
+                    closed_count += 1
+                    # Send rich close journal — edit original entry message if we have it
+                    hold_min = None
+                    if result.opened_at and result.closed_at:
+                        hold_min = (result.closed_at - result.opened_at).total_seconds() / 60.0
+                    try:
+                        await self._bot.send_trade_close(
+                            result,
+                            mfe_pct=result.mfe_pct, mae_pct=result.mae_pct,
+                            hold_minutes=hold_min, exit_reason="eod_flatten",
+                            edit_message_id=result.telegram_message_id,
+                        )
+                    except Exception as e:
+                        logger.warning(f"send_trade_close failed for {result.ticker}: {e}")
+        await self._bot.send_text(
+            f"🌅 EOD flatten: closed {closed_count}/{len(positions)} positions "
+            f"({mtc} min before close)"
+        )
 
     async def send_eod_summary(self) -> None:
         """Send end-of-day summary via Telegram."""
@@ -228,6 +547,165 @@ class Agent:
         except Exception as e:
             logger.error(f"Could not start LLM extractor: {e}", exc_info=True)
 
+    async def close_all_positions(self, exit_reason: str = "manual") -> int:
+        """Close every open position immediately. Returns number closed."""
+        with self._session_factory() as session:
+            positions = open_positions(session)
+            ids = [p.id for p in positions]
+
+        closed = 0
+        for pos_id in ids:
+            with self._session_factory() as session:
+                pos = session.get(PaperPositionRow, pos_id)
+                if pos is None or pos.status != "open":
+                    continue
+                closed_pos = await paper_trade.close_position(
+                    pos_id, 0, session,
+                    event_bus=self._event_bus,
+                    broker=self._broker,
+                    exit_reason=exit_reason,
+                    tracker=self._tracker,
+                )
+                if closed_pos:
+                    hold_min = (datetime.utcnow() - pos.opened_at).total_seconds() / 60
+                    await self._bot.send_trade_close(
+                        closed_pos,
+                        mfe_pct=closed_pos.mfe_pct,
+                        mae_pct=closed_pos.mae_pct,
+                        hold_minutes=hold_min,
+                        exit_reason=exit_reason,
+                        edit_message_id=closed_pos.telegram_message_id,
+                    )
+                    closed += 1
+        if closed:
+            logger.info(f"close_all_positions: closed {closed} position(s) [{exit_reason}]")
+        return closed
+
+    async def check_position_exits(self) -> None:
+        """Check all open positions against exit rules every eval cycle."""
+        if not self._momentum_enabled or self._pipeline_mode == "observe":
+            return
+        from dolev_ai.utils.market_hours import is_us_market_open
+        if not is_us_market_open():
+            return
+        from dolev_ai.prices import get_price_async
+        from dolev_ai.strategies.features import FeatureSnapshot
+
+        with self._session_factory() as session:
+            positions = open_positions(session)
+            pos_data = [
+                {
+                    "id": p.id, "ticker": p.ticker, "side": p.side,
+                    "entry_price": p.entry_price, "opened_at": p.opened_at,
+                    "mfe_pct": p.mfe_pct or 0.0, "mae_pct": p.mae_pct or 0.0,
+                    "telegram_message_id": p.telegram_message_id,
+                    "features_json": p.feature_snapshot_json,
+                }
+                for p in positions
+            ]
+
+        for pd in pos_data:
+            price = await get_price_async(pd["ticker"])
+            if not price:
+                continue
+
+            entry = pd["entry_price"] or 0
+            if entry == 0:
+                continue
+
+            side_sign = 1 if pd["side"] == "buy" else -1
+            current_pct = (price - entry) / entry * 100 * side_sign
+            mfe_pct = pd["mfe_pct"]
+            hold_minutes = (datetime.utcnow() - pd["opened_at"]).total_seconds() / 60
+
+            exit_reason = None
+
+            # 1) Minimum hold — never exit in first N minutes
+            if hold_minutes < self._exit_min_hold_minutes:
+                continue
+
+            # 2) Take profit
+            if current_pct >= self._exit_take_profit_pct:
+                exit_reason = "take_profit"
+
+            # 3) Trailing stop — activate only after MFE crosses start threshold
+            elif mfe_pct >= self._exit_trail_start_pct:
+                trail_stop = mfe_pct - self._exit_trail_distance_pct
+                if current_pct <= trail_stop:
+                    exit_reason = "trailing_stop"
+
+            # 4) Time-based exit — held too long with no meaningful profit
+            elif hold_minutes >= self._exit_max_hold_minutes:
+                if current_pct < self._exit_min_profit_to_hold_pct:
+                    exit_reason = "time_exit"
+
+            # 5) Confidence decay — re-score from stored features
+            if exit_reason is None and pd["features_json"]:
+                try:
+                    import json as _json
+                    feat_dict = _json.loads(pd["features_json"])
+                    snap = FeatureSnapshot(**{
+                        k: v for k, v in feat_dict.items()
+                        if k in FeatureSnapshot.__dataclass_fields__
+                    })
+                    result = self._scorer.score(snap, pd["side"])
+                    if result.score < self._exit_confidence_threshold:
+                        exit_reason = "confidence_decay"
+                except Exception:
+                    pass
+
+            if exit_reason:
+                logger.info(
+                    f"Exit [{exit_reason}] {pd['side'].upper()} ${pd['ticker']} "
+                    f"current={current_pct:+.2f}%  MFE={mfe_pct:+.2f}%  hold={hold_minutes:.1f}m"
+                )
+                with self._session_factory() as session:
+                    closed_pos = await paper_trade.close_position(
+                        pd["id"], 0, session,
+                        event_bus=self._event_bus,
+                        broker=self._broker,
+                        exit_reason=exit_reason,
+                        tracker=self._tracker,
+                    )
+                if closed_pos:
+                    await self._bot.send_trade_close(
+                        closed_pos,
+                        mfe_pct=closed_pos.mfe_pct,
+                        mae_pct=closed_pos.mae_pct,
+                        hold_minutes=hold_minutes,
+                        exit_reason=exit_reason,
+                        edit_message_id=closed_pos.telegram_message_id,
+                    )
+
+    async def _notify_market_open(self) -> None:
+        broker_status = "IBKR connected" if (self._broker and self._broker.connected) else "broker offline"
+        await self._bot.send_text(
+            f"*Market open* — 9:30 AM ET\n"
+            f"{broker_status}  |  pipeline: {self._pipeline_mode.upper()}\n"
+            f"_Momentum scanner running._"
+        )
+
+    async def _notify_market_close(self) -> None:
+        from dolev_ai.db import PaperPositionRow
+        with self._session_factory() as session:
+            open_count = (
+                session.query(PaperPositionRow)
+                .filter(PaperPositionRow.status == "open")
+                .count()
+            )
+        today_start = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+        with self._session_factory() as session:
+            trades_today = (
+                session.query(PaperPositionRow)
+                .filter(PaperPositionRow.opened_at >= today_start)
+                .count()
+            )
+        await self._bot.send_text(
+            f"*Market closed* — 4:00 PM ET\n"
+            f"Trades today: {trades_today}  |  Open positions: {open_count}\n"
+            f"_EOD flatten running..._"
+        )
+
     async def start_worker(self) -> bool:
         async with self._worker_lock:
             if self._scheduler is not None:
@@ -236,19 +714,33 @@ class Agent:
             await self._source.start()
             await self._tv_source.start()
             await self._bot.start()
+
+            if self._broker is not None:
+                connected = await self._broker.connect()
+                if connected:
+                    logger.info("IBKR broker connected — orders will route to paper account")
+                else:
+                    logger.warning("IBKR broker failed to connect — falling back to sim mode")
             await self._ensure_extractor()
 
             scheduler = AsyncIOScheduler()
-            scheduler.add_job(
-                self.collect, "interval",
-                minutes=self._cfg.get("poll_cadence_minutes", 5),
-                next_run_time=datetime.utcnow(),
-            )
-            scheduler.add_job(
-                self.evaluate, "interval",
-                minutes=self._cfg.get("eval_cadence_minutes", 2),
-                next_run_time=datetime.utcnow() + timedelta(seconds=30),
-            )
+
+            # Twitter scrape — skipped in pure-momentum mode
+            twitter_disabled = self._momentum_enabled and self._momentum_disable_twitter
+            if not twitter_disabled:
+                scheduler.add_job(
+                    self.collect, "interval",
+                    minutes=self._cfg.get("poll_cadence_minutes", 5),
+                    next_run_time=datetime.utcnow(),
+                )
+                scheduler.add_job(
+                    self.evaluate, "interval",
+                    minutes=self._cfg.get("eval_cadence_minutes", 2),
+                    next_run_time=datetime.utcnow() + timedelta(seconds=30),
+                )
+            else:
+                logger.info("Twitter timeline scraping disabled (momentum mode)")
+
             ret = self._cfg.get("retention", {}) or {}
             scheduler.add_job(
                 self.prune, "interval",
@@ -257,8 +749,32 @@ class Agent:
             )
             # Approval expiry — every minute
             scheduler.add_job(self.expire_approvals, "interval", minutes=1)
-            # TradingView movers — every N minutes (default 5)
-            if self._tv_enabled:
+
+            # Market data poll — momentum mode uses fast cadence (seconds),
+            # legacy mode uses minutes from tradingview config
+            if self._momentum_enabled:
+                scheduler.add_job(
+                    self.fetch_movers, "interval",
+                    seconds=self._momentum_poll_seconds,
+                    next_run_time=datetime.utcnow() + timedelta(seconds=10),
+                )
+                scheduler.add_job(
+                    self.evaluate_gradient, "interval",
+                    seconds=self._momentum_eval_seconds,
+                    next_run_time=datetime.utcnow() + timedelta(seconds=20),
+                )
+                scheduler.add_job(
+                    self.check_position_exits, "interval",
+                    seconds=self._momentum_eval_seconds,
+                    next_run_time=datetime.utcnow() + timedelta(seconds=25),
+                )
+                # EOD flatten — check every minute near close
+                scheduler.add_job(self.eod_flatten, "interval", minutes=1)
+                logger.info(
+                    f"Momentum scheduler: scanner every {self._momentum_poll_seconds}s, "
+                    f"strategy every {self._momentum_eval_seconds}s"
+                )
+            elif self._tv_enabled:
                 tv_cfg = self._cfg.get("tradingview", {}) or {}
                 scheduler.add_job(
                     self.fetch_movers, "interval",
@@ -274,10 +790,38 @@ class Agent:
                     hour=eod_cfg.get("cron_hour_utc", 21),
                     minute=eod_cfg.get("cron_minute", 0),
                 )
+            # Market open / close notifications (ET timezone)
+            if self._momentum_enabled:
+                scheduler.add_job(
+                    self._notify_market_open, "cron",
+                    day_of_week="mon-fri", hour=9, minute=30,
+                    timezone="America/New_York",
+                )
+                scheduler.add_job(
+                    self._notify_market_close, "cron",
+                    day_of_week="mon-fri", hour=16, minute=0,
+                    timezone="America/New_York",
+                )
+
             scheduler.start()
             self._scheduler = scheduler
             self._worker_started_at = datetime.utcnow()
-            logger.info("Dolev AI scraper agent started.")
+
+            # Forward-return observer always runs in momentum mode — it powers
+            # research reports even while paper-trading.
+            if self._momentum_enabled and self._observer is not None:
+                self._observer.start()
+
+            logger.info(
+                f"Dolev AI agent started [pipeline={self._pipeline_mode}, "
+                f"twitter={'on' if self._twitter_enabled else 'off'}]."
+            )
+            broker_status = "IBKR connected" if (self._broker and self._broker.connected) else "broker offline"
+            await self._bot.send_text(
+                f"*Dolev AI started* — mode: {self._pipeline_mode.upper()}\n"
+                f"{broker_status}  |  auto≥{self._auto_execute_conf:.0f}/100\n"
+                f"_Watching for signals..._"
+            )
             return True
 
     async def stop_worker(self) -> bool:
@@ -289,9 +833,16 @@ class Agent:
             self._scheduler = None
             self._worker_started_at = None
             scheduler.shutdown(wait=False)
+            if self._observer is not None:
+                await self._observer.stop()
+            if self._tracker is not None:
+                await self._tracker.stop_all()
+            await self._bot.send_text("*Dolev AI stopped.*")
             await self._bot.stop()
             await self._source.stop()
             await self._tv_source.stop()
+            if self._broker is not None:
+                await self._broker.disconnect()
             if self._extractor is not None:
                 await self._extractor.stop()
                 self._extractor = None
@@ -331,9 +882,29 @@ class Agent:
             logger.error(f"Prune failed: {e}", exc_info=True)
 
     async def fetch_movers(self) -> None:
-        """Poll TradingView top movers, persist, publish, and queue investigations."""
+        """Poll market movers (IBKR with gradient if connected, else TradingView)."""
+        # In momentum mode, skip when market is closed (no point computing gradient on stale prices)
+        if self._momentum_enabled:
+            from dolev_ai.utils.market_hours import is_us_market_open
+            if not is_us_market_open():
+                return
         try:
-            movers = await self._tv_source.fetch_movers()
+            movers = []
+            source = "TradingView"
+            if self._ibkr_market is not None and self._broker and self._broker.connected:
+                movers = await self._ibkr_market.fetch_movers()
+                source = "IBKR"
+            # Fall back to TradingView if IBKR scanner returned nothing
+            # (common cause: paper account missing market data subscription)
+            if not movers:
+                tv_movers = await self._tv_source.fetch_movers()
+                if tv_movers:
+                    source = "TradingView"
+                    if self._ibkr_market is not None:
+                        logger.warning("IBKR scanner empty — fell back to TradingView for movers; enriching top N with IBKR bars")
+                        movers = await self._ibkr_market.enrich_tv_movers(tv_movers)
+                    else:
+                        movers = tv_movers
         except Exception as e:
             logger.error(f"fetch_movers failed: {e}", exc_info=True)
             return
@@ -345,10 +916,12 @@ class Agent:
 
         gainers = [m for m in movers if m.side == "gainer"]
         losers = [m for m in movers if m.side == "loser"]
+        top = gainers[0] if gainers else None
+        grad_str = f"  gradient={top.gradient:+.3f}%/min" if top and getattr(top, "gradient", 0) else ""
         logger.info(
-            f"TradingView: {len(gainers)} gainers (top: ${gainers[0].ticker} {gainers[0].pct_change:+.1f}%) · "
-            f"{len(losers)} losers"
-            if gainers else f"TradingView: {len(movers)} movers"
+            f"{source}: {len(gainers)} gainers "
+            + (f"(top: ${top.ticker} {top.pct_change:+.1f}%{grad_str})" if top else "")
+            + f" · {len(losers)} losers"
         )
 
         await self._event_bus.publish({
@@ -368,10 +941,12 @@ class Agent:
             "ticker": m.ticker,
             "pct_change": round(m.pct_change, 2),
             "last_price": round(m.last_price, 2),
-            "rel_volume": round(m.rel_volume, 2),
-            "market_cap": m.market_cap,
+            "rel_volume": round(getattr(m, "rel_volume", 0.0), 2),
+            "market_cap": getattr(m, "market_cap", 0.0),
             "rank": m.rank,
             "side": m.side,
+            "gradient": round(getattr(m, "gradient", 0.0), 4),
+            "gradient_bars": getattr(m, "gradient_bars", 0),
         }
 
     async def _queue_investigations(self, movers: list) -> None:
@@ -537,15 +1112,16 @@ class Agent:
         since = datetime.utcnow() - timedelta(minutes=window)
 
         records = self._load_records(since)
-        if not records:
-            logger.info("Evaluate: no extractions in window")
-            return
 
         # Latest TradingView movements per ticker (read fresh each evaluate)
         latest_movements: dict = {}
         if self._tv_enabled:
             with self._session_factory() as session:
                 latest_movements = load_latest_movements(session, max_age_minutes=30)
+
+        if not records and not latest_movements:
+            logger.info("Evaluate: no extractions and no market data in window")
+            return
 
         ticker_scores, theme_scores, edges = aggregate(
             records, window_minutes=window, threshold=self._threshold,
@@ -724,6 +1300,10 @@ class Agent:
         logger.info("Monitoring dashboard: http://localhost:8000")
 
         logger.info("Dolev AI agent started. Press Ctrl+C to stop.")
+
+        # Auto-start the worker when momentum mode is enabled — no need to click the UI button
+        if self._momentum_enabled:
+            await self.start_worker()
 
         stop_event = asyncio.Event()
 
