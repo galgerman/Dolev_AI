@@ -241,10 +241,10 @@ class IBKRMarketSource:
                     self._ib.reqHistoricalDataAsync(
                         contract,
                         endDateTime="",
-                        durationStr=f"{duration_minutes} M",
+                        durationStr="3600 S",
                         barSizeSetting="1 min",
                         whatToShow="TRADES",
-                        useRTH=False,
+                        useRTH=True,
                         formatDate=1,
                         keepUpToDate=False,
                     ),
@@ -252,7 +252,7 @@ class IBKRMarketSource:
                 )
             return list(bars or [])
         except Exception as e:
-            logger.debug(f"Historical data failed for {ticker}: {e}")
+            logger.warning(f"Historical data failed for {ticker}: {e}")
             return []
 
     async def _fetch_snapshot(self, ticker: str) -> tuple[float, float, float, int]:
@@ -455,6 +455,56 @@ class IBKRMarketSource:
         logger.info(
             f"IBKR movers: {len(gainers)} gainers / {len(losers)} losers — "
             f"features computed for {len(top_enriched)} tickers "
+            f"({len(ref_symbols)} ref ETFs)"
+        )
+        return result
+
+    async def enrich_tv_movers(self, tv_movers: list) -> list[EnrichedMover]:
+        """Enrich TradingView movers with IBKR bar-based features.
+
+        Called when the IBKR scanner is unavailable (e.g. missing market data
+        subscription) but historical data still works.
+        """
+        if self._ref_cache:
+            self._ref_cache.start_cycle()
+
+        # Convert TV movers to CandidateMover for enrichment
+        candidates: list[CandidateMover] = []
+        for m in tv_movers:
+            candidates.append(CandidateMover(
+                ticker=m.ticker,
+                pct_change=getattr(m, "pct_change", 0.0),
+                last_price=getattr(m, "last_price", 0.0),
+                volume=getattr(m, "volume", 0),
+                side=getattr(m, "side", "gainer"),
+                rank=getattr(m, "rank", 0),
+            ))
+
+        by_move = sorted(candidates, key=lambda m: abs(m.pct_change), reverse=True)
+        top = by_move[:self._gradient_top_n]
+        rest = by_move[self._gradient_top_n:]
+
+        # Prefetch reference gradients
+        sector_etfs: set[str] = set()
+        if self._ref_cache:
+            for cand in top:
+                sector_etfs.add(self._ref_cache.get_sector_etf(cand.ticker))
+        ref_symbols = sorted({"SPY", "QQQ", *sector_etfs})
+        await self._prefetch_reference_gradients(ref_symbols)
+
+        top_enriched = await asyncio.gather(*[self._enrich(m) for m in top])
+
+        rest_enriched = [
+            EnrichedMover(
+                ticker=m.ticker, pct_change=m.pct_change, last_price=m.last_price,
+                volume=m.volume, side=m.side, rank=m.rank,
+            )
+            for m in rest
+        ]
+
+        result = list(top_enriched) + rest_enriched
+        logger.info(
+            f"TV movers enriched via IBKR bars: {len(top_enriched)} tickers "
             f"({len(ref_symbols)} ref ETFs)"
         )
         return result

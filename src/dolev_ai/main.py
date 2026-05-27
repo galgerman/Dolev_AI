@@ -743,12 +743,22 @@ class Agent:
             if not is_us_market_open():
                 return
         try:
+            movers = []
+            source = "TradingView"
             if self._ibkr_market is not None and self._broker and self._broker.connected:
                 movers = await self._ibkr_market.fetch_movers()
                 source = "IBKR"
-            else:
-                movers = await self._tv_source.fetch_movers()
-                source = "TradingView"
+            # Fall back to TradingView if IBKR scanner returned nothing
+            # (common cause: paper account missing market data subscription)
+            if not movers:
+                tv_movers = await self._tv_source.fetch_movers()
+                if tv_movers:
+                    source = "TradingView"
+                    if self._ibkr_market is not None:
+                        logger.warning("IBKR scanner empty — fell back to TradingView for movers; enriching top N with IBKR bars")
+                        movers = await self._ibkr_market.enrich_tv_movers(tv_movers)
+                    else:
+                        movers = tv_movers
         except Exception as e:
             logger.error(f"fetch_movers failed: {e}", exc_info=True)
             return
@@ -1144,6 +1154,10 @@ class Agent:
         logger.info("Monitoring dashboard: http://localhost:8000")
 
         logger.info("Dolev AI agent started. Press Ctrl+C to stop.")
+
+        # Auto-start the worker when momentum mode is enabled — no need to click the UI button
+        if self._momentum_enabled:
+            await self.start_worker()
 
         stop_event = asyncio.Event()
 
