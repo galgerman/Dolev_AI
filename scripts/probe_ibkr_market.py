@@ -27,7 +27,7 @@ async def main(port: int, n: int, gradient_n: int) -> None:
     connected = await broker.connect()
     if not connected:
         print("ERROR: Could not connect. Make sure TWS is running and API is enabled.")
-        print("  TWS → Edit → Global Configuration → API → Enable ActiveX and Socket Clients")
+        print("  TWS > Edit > Global Configuration > API > Enable ActiveX and Socket Clients")
         return
 
     pv = await broker.portfolio_value()

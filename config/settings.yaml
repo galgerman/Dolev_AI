@@ -86,19 +86,19 @@ twitter:
   enabled: false
 
 momentum:
-  enabled: false                                # master switch — flip true when IBKR is connected
+  enabled: true                                 # master switch — flip true when IBKR is connected
   poll_cadence_seconds: 30                      # IBKR scanner + feature refresh
   eval_cadence_seconds: 15                      # how often MomentumStrategy runs
   # Entry rules (pre-scoring filters)
   entry_threshold_pct_per_min: 0.3              # |gradient| floor before features get scored
   min_total_move_pct: 1.5                       # filter out flat noise
   approval_timeout_seconds: 60                  # short timeout — momentum fades fast
-  max_trades_per_day: 10                        # hard cap on auto-executes
+  max_trades_per_day: 5                         # hard cap on auto-executes
   # End-of-day
   flatten_minutes_before_close: 5               # close all positions N min before 4pm ET
 
 broker:
-  enabled: false              # flip to true when IBKR account is active
+  enabled: true               # flip to true when IBKR account is active
   trading_mode: paper         # paper | live  (paper=7497/4002, live=7496/4001)
   host: 127.0.0.1
   port: 7497                  # TWS paper=7497, live=7496 | IB Gateway paper=4002, live=4001
@@ -110,7 +110,7 @@ broker:
     max_open_positions: 5     # hard cap on concurrent open positions
 
   market_data:
-    enabled: false            # use IBKR as market data source instead of TradingView
+    enabled: true             # use IBKR as market data source instead of TradingView
     top_n_per_side: 50        # scanner rows per side (gainers / losers)
     gradient_top_n: 20        # compute features for top N movers by |%change|
     gradient_bars: 10         # last N 1-min bars used for slope computation
